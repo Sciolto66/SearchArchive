@@ -22,6 +22,7 @@ import javafx.stage.Stage;
  * @author Rowendu
  * @version 1.0.0
  */
+ // by: qwen3.5-27b-claude-4.6-opus-reasoning-distilled-qx64-hi-mlx
 public class ArchiveSearcher extends Application {
 
   // Supported archive extensions
