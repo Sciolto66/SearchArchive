@@ -18,6 +18,7 @@ import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.logging.LogManager;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
@@ -41,8 +42,26 @@ public class ArchiveSearcher extends Application {
   private Task<Integer> currentSearchTask;
 
   public static void main(String[] args) {
+    // 1. Ensure the application directory exists BEFORE loading the logger
+    File appDir = new File(System.getProperty("user.home"), ".archivesearcher");
+    if (!appDir.exists()) {
+        appDir.mkdirs(); // Creates the folder silently if it's missing
+    }
+
+    // 2. Load the logging configuration from inside the JAR
+    try (InputStream is = ArchiveSearcher.class.getResourceAsStream("/logging.properties")) {
+        if (is != null) {
+            LogManager.getLogManager().readConfiguration(is);
+        } else {
+            System.err.println("WARNING: logging.properties not found in classpath.");
+        }
+    } catch (Exception e) {
+        System.err.println("Failed to initialize custom logging configuration: " + e.getMessage());
+    }
+
+    // 3. Now launch the JavaFX application
     launch(args);
-  }
+}
 
   // Note: init() and stop() were completely removed, as System.Logger manages its own lifecycle
   // natively.
@@ -211,7 +230,7 @@ public class ArchiveSearcher extends Application {
   private void browseButtonToggle(boolean disable) {
     if (archivePathField.getParent() instanceof HBox box) {
       box.getChildren().stream()
-          .filter(node -> node instanceof Button)
+          .filter(Button.class::isInstance)
           .forEach(node -> node.setDisable(disable));
     }
   }
