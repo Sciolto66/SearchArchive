@@ -333,7 +333,6 @@ public class ArchiveSearcher extends Application {
 
   private File extractToTempFile(ZipFile zip, ZipEntry entry) throws IOException {
     File tempFile = File.createTempFile("nested", ".tmp");
-    tempFile.deleteOnExit();
 
     try (InputStream in = zip.getInputStream(entry);
         OutputStream out = new FileOutputStream(tempFile)) {
