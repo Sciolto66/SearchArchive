@@ -1,121 +1,356 @@
 package nl.rowendu;
 
+import javafx.application.Application;
+import javafx.application.Platform;
+import javafx.concurrent.Task;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.Scene;
+import javafx.scene.control.*;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
+import javafx.stage.Stage;
+
 import java.io.*;
-import java.util.*;
-import java.util.zip.*;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.util.Arrays;
+import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.logging.LogManager;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
-public class ArchiveSearcher {
-    private static final Set<String> SUPPORTED_EXTENSIONS = new HashSet<>(
-        Arrays.asList(".zip", ".jar", ".ear", ".sar")
-    );
-    private static final String SKIP_DIRECTORY = "META-INF";
-    private static final String LOG_FILE = "debug.log";
-    private static PrintWriter logWriter;
+// RC by Gemini 3 Pro
+public class ArchiveSearcher extends Application {
 
-    static {
-        try {
-            logWriter = new PrintWriter(new FileWriter(LOG_FILE, true));
-        } catch (IOException e) {
-            System.err.println("Could not create log file: " + e.getMessage());
-        }
+  // 1. Replaced PrintWriter with JDK System.Logger
+  private static final System.Logger LOGGER = System.getLogger(ArchiveSearcher.class.getName());
+
+  private static final Set<String> SUPPORTED_EXTENSIONS =
+      new HashSet<>(Arrays.asList(".zip", ".jar", ".ear", ".sar"));
+  private static final String SKIP_DIRECTORY = "META-INF";
+
+  private TextField searchFileField;
+  private TextField archivePathField;
+  private TextArea outputArea;
+  private Button startButton;
+  private Button cancelButton;
+  private ProgressIndicator progressIndicator;
+  private Task<Integer> currentSearchTask;
+
+  public static void main(String[] args) {
+    // 1. Ensure the application directory exists BEFORE loading the logger
+    File appDir = new File(System.getProperty("user.home"), ".archivesearcher");
+    if (!appDir.exists()) {
+        appDir.mkdirs(); // Creates the folder silently if it's missing
     }
 
-    public static void main(String[] args) {
-        if (args.length != 2) {
-            System.out.println("Usage: java -jar archivesearcher.jar \"<file to search>\" <archive file>");
-            System.exit(1);
+    // 2. Load the logging configuration from inside the JAR
+    try (InputStream is = ArchiveSearcher.class.getResourceAsStream("/logging.properties")) {
+        if (is != null) {
+            LogManager.getLogManager().readConfiguration(is);
+        } else {
+            System.err.println("WARNING: logging.properties not found in classpath.");
         }
+    } catch (Exception e) {
+        System.err.println("Failed to initialize custom logging configuration: " + e.getMessage());
+    }
 
-        String searchFile = args[0];
-        String archiveFile = args[1];
+    // 3. Now launch the JavaFX application
+    launch(args);
+}
 
-        if (!isArchiveSupported(archiveFile)) {
-            System.out.println("Unsupported archive type. Supported types: " + 
-                String.join(", ", SUPPORTED_EXTENSIONS));
-            System.exit(1);
-        }
+  // Note: init() and stop() were completely removed, as System.Logger manages its own lifecycle
+  // natively.
 
-        try {
-            searchInArchive(new File(archiveFile), searchFile, "");
-        } catch (IOException e) {
-            System.err.println("Error processing archive: " + e.getMessage());
-            System.exit(1);
-        } finally {
-            if (logWriter != null) {
-                logWriter.close();
+  @Override
+  public void start(Stage primaryStage) {
+    // --- Menu Bar ---
+    MenuItem quitMenuItem = new MenuItem("Quit");
+    quitMenuItem.setOnAction(e -> Platform.exit());
+    MenuBar menuBar = new MenuBar(new Menu("File", null, quitMenuItem));
+
+    // --- Input Section ---
+    Label searchLabel = new Label("Filename to Search:");
+    searchFileField = new TextField();
+    searchFileField.setPromptText("e.g., config (supports partial match)");
+    searchFileField.setPrefWidth(525);
+
+    Label archiveLabel = new Label("Archive File:");
+    archivePathField = new TextField();
+    archivePathField.setEditable(false);
+    archivePathField.setPrefWidth(525);
+
+    Button browseButton = new Button("Browse...");
+    browseButton.setOnAction(e -> chooseArchiveFile(primaryStage));
+
+    HBox searchBox = new HBox(10, searchLabel, searchFileField);
+    searchBox.setAlignment(Pos.CENTER_LEFT);
+
+    HBox archiveBox = new HBox(10, archiveLabel, archivePathField, browseButton);
+    archiveBox.setAlignment(Pos.CENTER_LEFT);
+
+    // --- Action Buttons & Progress ---
+    startButton = new Button("Start Search");
+    startButton.setDisable(true);
+    startButton.setOnAction(e -> runSearchTask());
+
+    cancelButton = new Button("Cancel");
+    cancelButton.setDisable(true);
+    cancelButton.setOnAction(
+        e -> {
+          if (currentSearchTask != null) currentSearchTask.cancel();
+        });
+
+    progressIndicator = new ProgressIndicator();
+    progressIndicator.setVisible(false);
+    progressIndicator.setPrefSize(20, 20);
+
+    HBox actionBox = new HBox(15, startButton, cancelButton, progressIndicator);
+    actionBox.setAlignment(Pos.CENTER_LEFT);
+
+    VBox inputBox = new VBox(15, searchBox, archiveBox, actionBox);
+    inputBox.setPadding(new Insets(15));
+
+    // --- Output Section ---
+    outputArea = new TextArea();
+    outputArea.setEditable(false);
+    outputArea.setWrapText(true);
+
+    // --- Layout Assembly ---
+    BorderPane topContainer = new BorderPane();
+    topContainer.setTop(menuBar);
+    topContainer.setCenter(inputBox);
+
+    BorderPane root = new BorderPane();
+    root.setTop(topContainer);
+    root.setCenter(outputArea);
+    BorderPane.setMargin(outputArea, new Insets(10));
+
+    // --- Reactivity ---
+    searchFileField.textProperty().addListener((obs, old, newVal) -> updateButtonState());
+    archivePathField.textProperty().addListener((obs, old, newVal) -> updateButtonState());
+
+    Scene scene = new Scene(root, 1225, 500);
+    primaryStage.setTitle("Archive Searcher");
+    primaryStage.setScene(scene);
+    primaryStage.show();
+  }
+
+  private void chooseArchiveFile(Stage stage) {
+    FileChooser fileChooser = new FileChooser();
+    fileChooser.setTitle("Select Archive");
+    fileChooser
+        .getExtensionFilters()
+        .add(
+            new FileChooser.ExtensionFilter(
+                "Archives (*.zip, *.jar, *.ear, *.sar)", "*.zip", "*.jar", "*.ear", "*.sar"));
+
+    File selectedFile = fileChooser.showOpenDialog(stage);
+    if (selectedFile != null) {
+      archivePathField.setText(selectedFile.getAbsolutePath());
+    }
+  }
+
+  private void updateButtonState() {
+    boolean hasSearch = !searchFileField.getText().isBlank();
+    boolean hasArchive = !archivePathField.getText().isBlank();
+
+    // Only re-enable start button if a task isn't currently running
+    boolean isRunning = currentSearchTask != null && currentSearchTask.isRunning();
+    startButton.setDisable(!(hasSearch && hasArchive) || isRunning);
+  }
+
+  private void runSearchTask() {
+    // 2. Partial Matching: Force lowercase once here to save CPU cycles inside the recursive loop
+    String searchFileLower = searchFileField.getText().trim().toLowerCase();
+    String archivePath = archivePathField.getText().trim();
+
+    if (!isArchiveSupported(archivePath)) {
+      appendOutput("Error: Unsupported archive type.");
+      return;
+    }
+
+    // Set UI to "Running" state
+    startButton.setDisable(true);
+    searchFileField.setDisable(true);
+    browseButtonToggle(true);
+    cancelButton.setDisable(false);
+    progressIndicator.setVisible(true);
+
+    outputArea.clear();
+    appendOutput("--- Starting Search for '*" + searchFileLower + "*' ---");
+
+    currentSearchTask =
+        new Task<>() {
+          @Override
+          protected Integer call() throws Exception {
+            File archiveFile = new File(archivePath);
+            if (!archiveFile.exists()) {
+              throw new IOException("Archive file does not exist: " + archivePath);
             }
+            return searchInArchive(archiveFile, searchFileLower, "", this);
+          }
+
+          @Override
+          protected void succeeded() {
+            int matches = getValue();
+            appendOutput(
+                matches == 0
+                    ? "No matches found."
+                    : "--- Search Complete (" + matches + " matches) ---");
+            resetUI();
+          }
+
+          @Override
+          protected void cancelled() {
+            appendOutput("--- Search Cancelled by User ---");
+            resetUI();
+          }
+
+          @Override
+          protected void failed() {
+            LOGGER.log(System.Logger.Level.ERROR, "Search Task Failed", getException());
+            appendOutput("Error: " + getException().getMessage());
+            resetUI();
+          }
+        };
+
+    Thread backgroundThread = new Thread(currentSearchTask);
+    backgroundThread.setDaemon(true);
+    backgroundThread.start();
+  }
+
+  private void browseButtonToggle(boolean disable) {
+    if (archivePathField.getParent() instanceof HBox box) {
+      box.getChildren().stream()
+          .filter(Button.class::isInstance)
+          .forEach(node -> node.setDisable(disable));
+    }
+  }
+
+  private void resetUI() {
+    updateButtonState();
+    searchFileField.setDisable(false);
+    browseButtonToggle(false);
+    cancelButton.setDisable(true);
+    progressIndicator.setVisible(false);
+  }
+
+  private void appendOutput(String message) {
+    Platform.runLater(
+        () -> {
+          outputArea.appendText(message + "\n");
+          outputArea.positionCaret(outputArea.getLength());
+          outputArea.setScrollTop(Double.MAX_VALUE);
+        });
+  }
+
+  private boolean isArchiveSupported(String fileName) {
+    return SUPPORTED_EXTENSIONS.stream().anyMatch(ext -> fileName.toLowerCase().endsWith(ext));
+  }
+
+  // 3. Cognitive Complexity Reduction
+  // Extracted the deep nesting. Used early returns and loop 'continue' statements.
+  private int searchInArchive(
+      File archiveFile, String searchFileLower, String parentPath, Task<?> task)
+      throws IOException {
+    int matchCount = 0;
+    LOGGER.log(
+        System.Logger.Level.INFO,
+        "Checking archive: {0}",
+        parentPath.isEmpty() ? archiveFile.getName() : parentPath);
+
+    try (ZipFile zip = new ZipFile(archiveFile)) {
+      Enumeration<? extends ZipEntry> entries = zip.entries();
+
+      while (entries.hasMoreElements()) {
+        // Graceful exit if user clicked cancel
+        if (task.isCancelled()) {
+          LOGGER.log(System.Logger.Level.INFO, "Search aborted early due to cancellation.");
+          break;
         }
-    }
 
-    private static void log(String message) {
-        if (logWriter != null) {
-            logWriter.println(message);
-            logWriter.flush();
+        ZipEntry entry = entries.nextElement();
+        String currentPath =
+            parentPath.isEmpty() ? entry.getName() : parentPath + "/" + entry.getName();
+
+        if (entry.isDirectory()) {
+          // System.Logger supports lazy evaluation via Supplier lambdas.
+          // The string is ONLY concatenated if DEBUG level is enabled!
+          LOGGER.log(System.Logger.Level.DEBUG, () -> "Traversing folder: " + currentPath);
+          continue;
         }
-    }
 
-    private static boolean isArchiveSupported(String fileName) {
-        return SUPPORTED_EXTENSIONS.stream()
-            .anyMatch(ext -> fileName.toLowerCase().endsWith(ext));
-    }
-
-    private static void searchInArchive(File archiveFile, String searchFile, String parentPath) 
-            throws IOException {
-        log("Checking archive: " + (parentPath.isEmpty() ? archiveFile.getName() : parentPath));
-        
-        try (ZipFile zip = new ZipFile(archiveFile)) {
-            Enumeration<? extends ZipEntry> entries = zip.entries();
-
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String currentPath = parentPath.isEmpty() ? 
-                    entry.getName() : parentPath + "/" + entry.getName();
-
-                if (entry.isDirectory()) {
-                    log("Traversing folder: " + currentPath);
-                } else {
-                    // Get just the filename part for comparison
-                    String fileName = new File(entry.getName()).getName();
-                    if (fileName.equals(searchFile)) {
-                        System.out.println("Found: " + currentPath);
-                        log("Found match: " + currentPath);
-                    }
-                }
-
-                if (!entry.isDirectory() && isArchiveSupported(entry.getName())) {
-                    if (entry.getName().startsWith(SKIP_DIRECTORY + "/")) {
-                        log("Skipping META-INF archive: " + currentPath);
-                        continue;
-                    }
-
-                    try {
-                        File tempFile = extractToTempFile(zip, entry);
-                        try {
-                            searchInArchive(tempFile, searchFile, currentPath);
-                        } finally {
-                            tempFile.delete();
-                        }
-                    } catch (Exception e) {
-                        log("Failed to process archive: " + currentPath + " - " + e.getMessage());
-                        continue;
-                    }
-                }
-            }
+        // Check for match (Partial & Case-Insensitive)
+        String fileNameLower = new File(entry.getName()).getName().toLowerCase();
+        if (fileNameLower.contains(searchFileLower)) {
+          appendOutput("Found: " + currentPath);
+          LOGGER.log(System.Logger.Level.INFO, "Found match: {0}", currentPath);
+          matchCount++;
         }
-    }
 
-    private static File extractToTempFile(ZipFile zip, ZipEntry entry) throws IOException {
-        File tempFile = File.createTempFile("nested", ".tmp");
-        tempFile.deleteOnExit();
+        // Check if we need to recurse into a nested archive
+        if (isArchiveSupported(entry.getName())) {
+          if (entry.getName().startsWith(SKIP_DIRECTORY + "/")) {
+            LOGGER.log(
+                System.Logger.Level.DEBUG, () -> "Skipping META-INF archive: " + currentPath);
+            continue;
+          }
 
-        try (InputStream in = zip.getInputStream(entry);
-             OutputStream out = new FileOutputStream(tempFile)) {
-            byte[] buffer = new byte[4096];
-            int bytesRead;
-            while ((bytesRead = in.read(buffer)) != -1) {
-                out.write(buffer, 0, bytesRead);
-            }
+          // Extracted recursive logic to a separate helper method to flatten code
+          matchCount += processNestedArchive(zip, entry, searchFileLower, currentPath, task);
         }
-        return tempFile;
+      }
+    } catch (Exception e) {
+      throw new IOException("Error processing archive: " + e.getMessage(), e);
     }
-} 
+    return matchCount;
+  }
+
+  // Helper method to keep searchInArchive clean and handle the temp file lifecycle safely
+  private int processNestedArchive(
+      ZipFile zip, ZipEntry entry, String searchFileLower, String currentPath, Task<?> task) {
+    try {
+      File tempFile = extractToTempFile(zip, entry);
+      try {
+        return searchInArchive(tempFile, searchFileLower, currentPath, task);
+      } finally {
+        deleteTempFile(tempFile);
+      }
+    } catch (Exception e) {
+      LOGGER.log(System.Logger.Level.ERROR, "Failed to process nested archive: " + currentPath, e);
+      return 0; 
+    }
+  }
+
+  private void deleteTempFile(File tempFile) {
+    try {
+      Files.delete(tempFile.toPath());
+    } catch (NoSuchFileException ignored) {
+      // Already removed; nothing left to clean up.
+    } catch (IOException e) {
+      LOGGER.log(
+          System.Logger.Level.WARNING,
+          "Failed to delete temporary file " + tempFile.getAbsolutePath() + ": " + e.getMessage());
+    }
+  }
+
+  private File extractToTempFile(ZipFile zip, ZipEntry entry) throws IOException {
+    File tempFile = File.createTempFile("nested", ".tmp");
+
+    try (InputStream in = zip.getInputStream(entry);
+        OutputStream out = new FileOutputStream(tempFile)) {
+      byte[] buffer = new byte[8192]; // Bumped buffer size to 8kb for slightly faster I/O
+      int bytesRead;
+      while ((bytesRead = in.read(buffer)) != -1) {
+        out.write(buffer, 0, bytesRead);
+      }
+    }
+    return tempFile;
+  }
+}

@@ -1,0 +1,152 @@
+name: Build Native Installers
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      win_console:
+        description: "Enable Windows console window for debugging"
+        required: false
+        default: "false"
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: ArchiveSearcher.exe
+            package_type: exe
+            maven_profile: windows
+          - os: macos-latest
+            artifact_name: ArchiveSearcher.dmg
+            package_type: dmg
+            maven_profile: mac
+          - os: ubuntu-latest
+            artifact_name: ArchiveSearcher.deb
+            package_type: deb
+            maven_profile: linux
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: "temurin"
+          cache: "maven"
+
+      - name: Build with Maven
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.maven_profile }}" ]; then
+            mvn -q -B -DskipTests -P "${{ matrix.maven_profile }}" package
+          else
+            mvn -q -B -DskipTests package
+          fi
+
+      - name: Extract JavaFX modules
+        shell: bash
+        run: |
+          mkdir -p javafx-modules
+          mvn dependency:copy-dependencies -DoutputDirectory=javafx-modules -DincludeGroupIds=org.openjfx -q -B -P "${{ matrix.maven_profile }}"
+
+      - name: Extract non-JavaFX dependencies
+        shell: bash
+        run: |
+          mkdir -p jpackage-input
+          cp target/ArchiveSearcher.jar jpackage-input/
+          mvn dependency:copy-dependencies -DoutputDirectory=jpackage-input -DexcludeGroupIds=org.openjfx -q -B -P "${{ matrix.maven_profile }}"
+          # Ensure no JavaFX modules accidentally got copied (safety check)
+          find jpackage-input -name "javafx-*.jar" -delete || true
+      
+      - name: Prepare Windows icon
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p build/windows
+          if command -v magick >/dev/null 2>&1; then
+            magick src/main/resources/images/ArchiveSearcher.svg.png -define icon:auto-resize=256,128,64,48,32,16 build/windows/ArchiveSearcher.ico
+          else
+            echo "Error: ImageMagick (magick) not found to generate .ico"
+            exit 1
+          fi
+
+      - name: Prepare macOS icon
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p build/macos/ArchiveSearcher.iconset
+          sips -z 16 16 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_16x16.png
+          sips -z 32 32 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_16x16@2x.png
+          sips -z 32 32 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_32x32.png
+          sips -z 64 64 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_32x32@2x.png
+          sips -z 128 128 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_128x128.png
+          sips -z 256 256 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_128x128@2x.png
+          sips -z 256 256 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_256x256.png
+          sips -z 512 512 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_256x256@2x.png
+          sips -z 512 512 src/main/resources/images/ArchiveSearcher.svg.png --out build/macos/ArchiveSearcher.iconset/icon_512x512.png
+          cp src/main/resources/images/ArchiveSearcher.svg.png build/macos/ArchiveSearcher.iconset/icon_512x512@2x.png
+          iconutil -c icns build/macos/ArchiveSearcher.iconset -o build/macos/ArchiveSearcher.icns
+
+      - name: Run jpackage
+        shell: bash
+        run: |
+          # Build module path from JavaFX modules only, ensuring no duplicates
+          PATH_SEPARATOR=":"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            PATH_SEPARATOR=";"
+          fi
+          MODULE_PATH=$(find javafx-modules -name "*.jar" -type f | sort -u | tr '\n' "${PATH_SEPARATOR}")
+          # Remove trailing separator if present
+          MODULE_PATH=${MODULE_PATH%${PATH_SEPARATOR}}
+          if [ -z "$MODULE_PATH" ]; then
+            echo "Error: No JavaFX modules found in javafx-modules directory"
+            exit 1
+          fi
+          echo "Module path: $MODULE_PATH"
+          WIN_OPTIONS=""
+          ICON_PATH="src/main/resources/images/ArchiveSearcher.svg.png"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            WIN_OPTIONS="--win-shortcut --win-menu --win-dir-chooser"
+            if [ "${{ inputs.win_console }}" = "true" ]; then
+              WIN_OPTIONS="--win-console ${WIN_OPTIONS}"
+            fi
+            ICON_PATH="build/windows/ArchiveSearcher.ico"
+          elif [ "${RUNNER_OS}" = "macOS" ]; then
+            ICON_PATH="build/macos/ArchiveSearcher.icns"
+          fi
+          jpackage \
+            --name ArchiveSearcher \
+            --input jpackage-input/ \
+            --main-jar ArchiveSearcher.jar \
+            --main-class nl.rowendu.ArchiveSearcher \
+            --module-path "$MODULE_PATH" \
+            --add-modules javafx.controls,javafx.fxml,javafx.graphics,java.naming \
+            --icon "$ICON_PATH" \
+            --type ${{ matrix.package_type }} \
+            $WIN_OPTIONS \
+            --dest output/
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 output/* > output/SHA256SUMS.txt
+          else
+            sha256sum output/* > output/SHA256SUMS.txt
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.os }}-installer
+          path: output/*
