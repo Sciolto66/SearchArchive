@@ -14,6 +14,8 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -35,7 +37,6 @@ public class ArchiveSearcher extends Application {
   private TextField searchFileField;
   private TextField archivePathField;
   private TextArea outputArea;
-  private ScrollPane scrollPane;
   private Button startButton;
   private Button cancelButton;
   private ProgressIndicator progressIndicator;
@@ -77,12 +78,12 @@ public class ArchiveSearcher extends Application {
     Label searchLabel = new Label("Filename to Search:");
     searchFileField = new TextField();
     searchFileField.setPromptText("e.g., config (supports partial match)");
-    searchFileField.setPrefWidth(300);
+    searchFileField.setPrefWidth(525);
 
     Label archiveLabel = new Label("Archive File:");
     archivePathField = new TextField();
     archivePathField.setEditable(false);
-    archivePathField.setPrefWidth(300);
+    archivePathField.setPrefWidth(525);
 
     Button browseButton = new Button("Browse...");
     browseButton.setOnAction(e -> chooseArchiveFile(primaryStage));
@@ -120,10 +121,6 @@ public class ArchiveSearcher extends Application {
     outputArea.setEditable(false);
     outputArea.setWrapText(true);
 
-    scrollPane = new ScrollPane(outputArea);
-    scrollPane.setFitToWidth(true);
-    scrollPane.setPadding(new Insets(10));
-
     // --- Layout Assembly ---
     BorderPane topContainer = new BorderPane();
     topContainer.setTop(menuBar);
@@ -131,13 +128,14 @@ public class ArchiveSearcher extends Application {
 
     BorderPane root = new BorderPane();
     root.setTop(topContainer);
-    root.setCenter(scrollPane);
+    root.setCenter(outputArea);
+    BorderPane.setMargin(outputArea, new Insets(10));
 
     // --- Reactivity ---
     searchFileField.textProperty().addListener((obs, old, newVal) -> updateButtonState());
     archivePathField.textProperty().addListener((obs, old, newVal) -> updateButtonState());
 
-    Scene scene = new Scene(root, 700, 500);
+    Scene scene = new Scene(root, 1225, 500);
     primaryStage.setTitle("Archive Searcher");
     primaryStage.setScene(scene);
     primaryStage.show();
@@ -247,9 +245,8 @@ public class ArchiveSearcher extends Application {
     Platform.runLater(
         () -> {
           outputArea.appendText(message + "\n");
-          if (scrollPane != null) {
-            scrollPane.setVvalue(1.0);
-          }
+          outputArea.positionCaret(outputArea.getLength());
+          outputArea.setScrollTop(Double.MAX_VALUE);
         });
   }
 
@@ -323,11 +320,23 @@ public class ArchiveSearcher extends Application {
       try {
         return searchInArchive(tempFile, searchFileLower, currentPath, task);
       } finally {
-        tempFile.delete(); // Guarantee cleanup
+        deleteTempFile(tempFile);
       }
     } catch (Exception e) {
       LOGGER.log(System.Logger.Level.ERROR, "Failed to process nested archive: " + currentPath, e);
-      return 0; // Fail gracefully for this specific nested archive and keep searching
+      return 0; 
+    }
+  }
+
+  private void deleteTempFile(File tempFile) {
+    try {
+      Files.delete(tempFile.toPath());
+    } catch (NoSuchFileException ignored) {
+      // Already removed; nothing left to clean up.
+    } catch (IOException e) {
+      LOGGER.log(
+          System.Logger.Level.WARNING,
+          "Failed to delete temporary file " + tempFile.getAbsolutePath() + ": " + e.getMessage());
     }
   }
 
