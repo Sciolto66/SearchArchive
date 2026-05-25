@@ -12,19 +12,23 @@ import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TitledPane;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
@@ -34,15 +38,18 @@ import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.prefs.Preferences;
 import java.util.logging.LogManager;
 
 public class ArchiveSearcher extends Application {
   private static final System.Logger LOGGER = System.getLogger(ArchiveSearcher.class.getName());
   private static final String LAST_JSONL_FOLDER_KEY = "jsonlHistory.lastFolder";
+  private static final String LAST_SEARCH_MODE_KEY = "search.lastMode";
 
   private final ArchiveFileSearcher archiveFileSearcher = new ArchiveFileSearcher();
   private final JsonlHistorySearcher jsonlHistorySearcher = new JsonlHistorySearcher();
+  private final JsonlTranscriptParser jsonlTranscriptParser = new JsonlTranscriptParser();
   private final Preferences preferences = Preferences.userNodeForPackage(ArchiveSearcher.class);
   private final ObjectMapper objectMapper = new ObjectMapper();
   private final ObjectWriter prettyJsonWriter = objectMapper.writerWithDefaultPrettyPrinter();
@@ -85,7 +92,7 @@ public class ArchiveSearcher extends Application {
     MenuBar menuBar = new MenuBar(new Menu("File", null, quitMenuItem));
 
     modeBox = new ComboBox<>(FXCollections.observableArrayList(SearchMode.values()));
-    modeBox.getSelectionModel().select(SearchMode.ARCHIVE_FILENAME);
+    modeBox.getSelectionModel().select(lastSearchMode());
     modeBox.setPrefWidth(180);
     modeBox.valueProperty().addListener((obs, oldMode, newMode) -> applyMode());
 
@@ -199,6 +206,17 @@ public class ArchiveSearcher extends Application {
                   showResult(row.getItem());
                 }
               });
+          row.setOnContextMenuRequested(
+              event -> {
+                if (!row.isEmpty() && row.getItem().getMode() == SearchMode.JSONL_HISTORY) {
+                  ContextMenu menu = new ContextMenu();
+                  MenuItem chatViewItem = new MenuItem("Open Chat View");
+                  chatViewItem.setOnAction(e -> showChatTranscript(row.getItem()));
+                  menu.getItems().add(chatViewItem);
+                  menu.show(row, event.getScreenX(), event.getScreenY());
+                  event.consume();
+                }
+              });
           return row;
         });
     return table;
@@ -213,6 +231,7 @@ public class ArchiveSearcher extends Application {
 
   private void applyMode() {
     SearchMode mode = modeBox.getValue();
+    preferences.put(LAST_SEARCH_MODE_KEY, mode.name());
     searchLabel.setText(mode.getSearchLabel());
     pathLabel.setText(mode.getPathLabel());
 
@@ -226,6 +245,15 @@ public class ArchiveSearcher extends Application {
 
     resultsTable.getItems().clear();
     updateButtonState();
+  }
+
+  private SearchMode lastSearchMode() {
+    String storedMode = preferences.get(LAST_SEARCH_MODE_KEY, SearchMode.ARCHIVE_FILENAME.name());
+    try {
+      return SearchMode.valueOf(storedMode);
+    } catch (IllegalArgumentException e) {
+      return SearchMode.ARCHIVE_FILENAME;
+    }
   }
 
   private void choosePath(Stage stage) {
@@ -370,6 +398,138 @@ public class ArchiveSearcher extends Application {
     showTextWindow("Archive Match", result.getLocation(), content);
   }
 
+  private void showChatTranscript(SearchResult selectedResult) {
+    try {
+      ChatTranscript transcript = jsonlTranscriptParser.parse(selectedResult.getFilePath());
+      showChatWindow(transcript, selectedResult.getLineNumber());
+    } catch (Exception e) {
+      LOGGER.log(System.Logger.Level.ERROR, "Failed to parse JSONL transcript", e);
+      showError("Could not open chat view: " + e.getMessage());
+    }
+  }
+
+  private void showChatWindow(ChatTranscript transcript, int highlightedLineNumber) {
+    Stage stage = new Stage();
+    stage.setTitle("Chat View");
+
+    Label headerLabel = new Label(transcript.getSourceFile().toString());
+    headerLabel.setWrapText(true);
+    headerLabel.setStyle("-fx-font-weight: bold;");
+
+    VBox turnList = new VBox(10);
+    turnList.setPadding(new Insets(12));
+    AtomicReference<javafx.scene.Node> highlightedNode = new AtomicReference<>();
+    for (ChatTurn turn : transcript.getTurns()) {
+      boolean highlighted = turn.getLineNumber() == highlightedLineNumber;
+      javafx.scene.Node turnNode = createTurnNode(turn, highlighted);
+      if (highlighted) {
+        highlightedNode.set(turnNode);
+      }
+      turnList.getChildren().add(turnNode);
+    }
+
+    ScrollPane scrollPane = new ScrollPane(turnList);
+    scrollPane.setFitToWidth(true);
+
+    VBox root = new VBox(10, headerLabel, scrollPane);
+    root.setPadding(new Insets(12));
+    VBox.setVgrow(scrollPane, Priority.ALWAYS);
+
+    stage.setScene(new Scene(root, 920, 720));
+    stage.show();
+    scrollToNode(scrollPane, turnList, highlightedNode.get());
+  }
+
+  private void scrollToNode(ScrollPane scrollPane, VBox content, javafx.scene.Node node) {
+    if (node == null) {
+      return;
+    }
+    Platform.runLater(
+        () -> {
+          double viewportHeight = scrollPane.getViewportBounds().getHeight();
+          double contentHeight = content.getBoundsInLocal().getHeight();
+          double nodeY = node.getBoundsInParent().getMinY();
+
+          if (contentHeight <= viewportHeight) {
+            scrollPane.setVvalue(0);
+            return;
+          }
+
+          double target = nodeY / (contentHeight - viewportHeight);
+          scrollPane.setVvalue(Math.max(0, Math.min(1, target)));
+        });
+  }
+
+  private javafx.scene.Node createTurnNode(ChatTurn turn, boolean highlighted) {
+    if (turn.isCollapsed()) {
+      TitledPane pane = new TitledPane(turnHeader(turn), chatContentArea(turn.getContent()));
+      pane.setExpanded(false);
+      pane.setStyle(cardStyle(turn.getRole(), highlighted));
+      return pane;
+    }
+
+    Label roleLabel = new Label(turnHeader(turn));
+    roleLabel.setStyle("-fx-font-weight: bold;");
+
+    Label contentLabel = new Label(emptyFallback(turn.getContent()));
+    contentLabel.setWrapText(true);
+
+    VBox card = new VBox(6, roleLabel, contentLabel);
+    if (!turn.getEnvironment().isBlank()) {
+      Label environmentLabel = new Label(turn.getEnvironment());
+      environmentLabel.setWrapText(true);
+      environmentLabel.setStyle("-fx-text-fill: #5f6368; -fx-font-size: 11px;");
+      card.getChildren().add(1, environmentLabel);
+    }
+    card.setPadding(new Insets(10));
+    card.setStyle(cardStyle(turn.getRole(), highlighted));
+    return card;
+  }
+
+  private String turnHeader(ChatTurn turn) {
+    StringBuilder header = new StringBuilder();
+    header.append(turn.getRole().getDisplayName()).append(" - line ").append(turn.getLineNumber());
+    if (!turn.getTimestamp().isBlank()) {
+      header.append(" - ").append(turn.getTimestamp());
+    }
+    return header.toString();
+  }
+
+  private TextArea chatContentArea(String content) {
+    TextArea textArea = new TextArea(emptyFallback(content));
+    textArea.setEditable(false);
+    textArea.setWrapText(true);
+    textArea.setPrefRowCount(8);
+    return textArea;
+  }
+
+  private String emptyFallback(String value) {
+    if (value == null || value.isBlank()) {
+      return "(no displayable content)";
+    }
+    return value;
+  }
+
+  private String cardStyle(ChatRole role, boolean highlighted) {
+    String background =
+        switch (role) {
+          case USER -> "#eef5ff";
+          case ASSISTANT -> "#f7f7f4";
+          case SYSTEM -> "#f1f3f4";
+          case TOOL -> "#fff7e6";
+          case UNKNOWN -> "#f8f1f7";
+        };
+    String border = highlighted ? "#d93025" : "#d7dce1";
+    String width = highlighted ? "2" : "1";
+    return "-fx-background-color: "
+        + background
+        + "; -fx-border-color: "
+        + border
+        + "; -fx-border-width: "
+        + width
+        + "; -fx-border-radius: 6; -fx-background-radius: 6; -fx-padding: 8;";
+  }
+
   private void showTextWindow(String title, String header, String content) {
     Stage stage = new Stage();
     stage.setTitle(title);
@@ -383,7 +543,7 @@ public class ArchiveSearcher extends Application {
 
     VBox root = new VBox(10, headerLabel, textArea);
     root.setPadding(new Insets(12));
-    VBox.setVgrow(textArea, javafx.scene.layout.Priority.ALWAYS);
+    VBox.setVgrow(textArea, Priority.ALWAYS);
 
     stage.setScene(new Scene(root, 820, 620));
     stage.show();
