@@ -1,12 +1,16 @@
 package nl.rowendu;
 
 import java.nio.file.Path;
+import java.util.Set;
+import java.util.TreeSet;
 
 final class SearchResult {
   private final SearchMode mode;
   private final Path filePath;
   private final String location;
+  private final String title;
   private final int lineNumber;
+  private final Set<Integer> sourceLineNumbers;
   private final String displayText;
   private final String rawContent;
 
@@ -17,12 +21,44 @@ final class SearchResult {
       int lineNumber,
       String displayText,
       String rawContent) {
+    this(mode, filePath, location, mode.toString(), lineNumber, displayText, rawContent);
+  }
+
+  SearchResult(
+      SearchMode mode,
+      Path filePath,
+      String location,
+      String title,
+      int lineNumber,
+      String displayText,
+      String rawContent) {
+    this(mode, filePath, location, title, lineNumber, Set.of(lineNumber), displayText, rawContent);
+  }
+
+  private SearchResult(
+      SearchMode mode,
+      Path filePath,
+      String location,
+      String title,
+      int lineNumber,
+      Set<Integer> sourceLineNumbers,
+      String displayText,
+      String rawContent) {
     this.mode = mode;
     this.filePath = filePath;
     this.location = location;
+    this.title = title;
     this.lineNumber = lineNumber;
+    this.sourceLineNumbers = Set.copyOf(sourceLineNumbers);
     this.displayText = displayText;
     this.rawContent = rawContent;
+  }
+
+  SearchResult withAdditionalSourceLine(int sourceLineNumber) {
+    TreeSet<Integer> mergedLineNumbers = new TreeSet<>(sourceLineNumbers);
+    mergedLineNumbers.add(sourceLineNumber);
+    return new SearchResult(
+        mode, filePath, location, title, lineNumber, mergedLineNumbers, displayText, rawContent);
   }
 
   SearchMode getMode() {
@@ -37,8 +73,22 @@ final class SearchResult {
     return location;
   }
 
+  String getTitle() {
+    return title;
+  }
+
   int getLineNumber() {
     return lineNumber;
+  }
+
+  String getLineLabel() {
+    if (sourceLineNumbers.size() == 1) {
+      return lineNumber > 0 ? Integer.toString(lineNumber) : "";
+    }
+    return new TreeSet<>(sourceLineNumbers).stream()
+        .map(String::valueOf)
+        .reduce((left, right) -> left + ", " + right)
+        .orElse(Integer.toString(lineNumber));
   }
 
   String getDisplayText() {
