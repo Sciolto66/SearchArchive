@@ -99,6 +99,7 @@ public class ArchiveSearcher extends Application {
     searchLabel = new Label();
     searchTextField = new TextField();
     searchTextField.setPrefWidth(520);
+    searchTextField.setOnAction(e -> runSearchIfReady());
 
     pathLabel = new Label();
     pathField = new TextField();
@@ -168,33 +169,26 @@ public class ArchiveSearcher extends Application {
     table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
     table.setPlaceholder(new Label("No results"));
 
-    TableColumn<SearchResult, String> typeColumn = new TableColumn<>("Type");
-    typeColumn.setCellValueFactory(
-        data -> new ReadOnlyStringWrapper(data.getValue().getMode().toString()));
-    typeColumn.setPrefWidth(140);
+    TableColumn<SearchResult, String> titleColumn = new TableColumn<>("Title");
+    titleColumn.setCellValueFactory(
+        data -> new ReadOnlyStringWrapper(data.getValue().getTitle()));
+    titleColumn.setPrefWidth(760);
 
     TableColumn<SearchResult, String> fileColumn = new TableColumn<>("File");
     fileColumn.setCellValueFactory(
-        data -> new ReadOnlyStringWrapper(data.getValue().getFilePath().toString()));
+        data -> new ReadOnlyStringWrapper(data.getValue().getFilePath().getFileName().toString()));
     fileColumn.setPrefWidth(360);
 
     TableColumn<SearchResult, String> lineColumn = new TableColumn<>("Line");
     lineColumn.setCellValueFactory(
-        data -> {
-          int lineNumber = data.getValue().getLineNumber();
-          return new ReadOnlyStringWrapper(lineNumber > 0 ? Integer.toString(lineNumber) : "");
-        });
+        data ->
+           new ReadOnlyStringWrapper(data.getValue().getLineLabel())
+        );
     lineColumn.setPrefWidth(70);
 
-    TableColumn<SearchResult, String> locationColumn = new TableColumn<>("Location / Preview");
-    locationColumn.setCellValueFactory(
-        data -> new ReadOnlyStringWrapper(resultText(data.getValue())));
-    locationColumn.setPrefWidth(620);
-
-    table.getColumns().add(typeColumn);
+    table.getColumns().add(titleColumn);
     table.getColumns().add(fileColumn);
     table.getColumns().add(lineColumn);
-    table.getColumns().add(locationColumn);
     table.setRowFactory(
         view -> {
           var row = new javafx.scene.control.TableRow<SearchResult>();
@@ -212,7 +206,9 @@ public class ArchiveSearcher extends Application {
                   ContextMenu menu = new ContextMenu();
                   MenuItem chatViewItem = new MenuItem("Open Chat View");
                   chatViewItem.setOnAction(e -> showChatTranscript(row.getItem()));
-                  menu.getItems().add(chatViewItem);
+                  MenuItem rawJsonItem = new MenuItem("Open Raw JSON");
+                  rawJsonItem.setOnAction(e -> showJsonlResult(row.getItem()));
+                  menu.getItems().addAll(chatViewItem, rawJsonItem);
                   menu.show(row, event.getScreenX(), event.getScreenY());
                   event.consume();
                 }
@@ -220,13 +216,6 @@ public class ArchiveSearcher extends Application {
           return row;
         });
     return table;
-  }
-
-  private String resultText(SearchResult result) {
-    if (result.getMode() == SearchMode.JSONL_HISTORY) {
-      return result.getDisplayText();
-    }
-    return result.getLocation();
   }
 
   private void applyMode() {
@@ -353,6 +342,12 @@ public class ArchiveSearcher extends Application {
     backgroundThread.start();
   }
 
+  private void runSearchIfReady() {
+    if (!startButton.isDisabled()) {
+      runSearchTask();
+    }
+  }
+
   private void setRunningState(boolean running) {
     modeBox.setDisable(running);
     searchTextField.setDisable(running);
@@ -368,7 +363,7 @@ public class ArchiveSearcher extends Application {
 
   private void showResult(SearchResult result) {
     if (result.getMode() == SearchMode.JSONL_HISTORY) {
-      showJsonlResult(result);
+      showChatTranscript(result);
     } else {
       showArchiveResult(result);
     }
@@ -401,14 +396,14 @@ public class ArchiveSearcher extends Application {
   private void showChatTranscript(SearchResult selectedResult) {
     try {
       ChatTranscript transcript = jsonlTranscriptParser.parse(selectedResult.getFilePath());
-      showChatWindow(transcript, selectedResult.getLineNumber());
+      showChatWindow(transcript, selectedResult);
     } catch (Exception e) {
       LOGGER.log(System.Logger.Level.ERROR, "Failed to parse JSONL transcript", e);
       showError("Could not open chat view: " + e.getMessage());
     }
   }
 
-  private void showChatWindow(ChatTranscript transcript, int highlightedLineNumber) {
+  private void showChatWindow(ChatTranscript transcript, SearchResult selectedResult) {
     Stage stage = new Stage();
     stage.setTitle("Chat View");
 
@@ -416,11 +411,18 @@ public class ArchiveSearcher extends Application {
     headerLabel.setWrapText(true);
     headerLabel.setStyle("-fx-font-weight: bold;");
 
+    Button rawJsonButton = new Button("Raw JSON");
+    rawJsonButton.setOnAction(event -> showJsonlResult(selectedResult));
+
+    HBox headerBox = new HBox(10, headerLabel, rawJsonButton);
+    headerBox.setAlignment(Pos.CENTER_LEFT);
+    HBox.setHgrow(headerLabel, Priority.ALWAYS);
+
     VBox turnList = new VBox(10);
     turnList.setPadding(new Insets(12));
     AtomicReference<javafx.scene.Node> highlightedNode = new AtomicReference<>();
     for (ChatTurn turn : transcript.getTurns()) {
-      boolean highlighted = turn.getLineNumber() == highlightedLineNumber;
+      boolean highlighted = turn.includesSourceLine(selectedResult.getLineNumber());
       javafx.scene.Node turnNode = createTurnNode(turn, highlighted);
       if (highlighted) {
         highlightedNode.set(turnNode);
@@ -431,7 +433,7 @@ public class ArchiveSearcher extends Application {
     ScrollPane scrollPane = new ScrollPane(turnList);
     scrollPane.setFitToWidth(true);
 
-    VBox root = new VBox(10, headerLabel, scrollPane);
+    VBox root = new VBox(10, headerBox, scrollPane);
     root.setPadding(new Insets(12));
     VBox.setVgrow(scrollPane, Priority.ALWAYS);
 
@@ -461,46 +463,38 @@ public class ArchiveSearcher extends Application {
   }
 
   private javafx.scene.Node createTurnNode(ChatTurn turn, boolean highlighted) {
-    if (turn.isCollapsed()) {
-      TitledPane pane = new TitledPane(turnHeader(turn), chatContentArea(turn.getContent()));
-      pane.setExpanded(false);
-      pane.setStyle(cardStyle(turn.getRole(), highlighted));
-      return pane;
-    }
+    TextArea contentArea = selectableTextArea(emptyFallback(turn.getContent()));
 
-    Label roleLabel = new Label(turnHeader(turn));
-    roleLabel.setStyle("-fx-font-weight: bold;");
-
-    Label contentLabel = new Label(emptyFallback(turn.getContent()));
-    contentLabel.setWrapText(true);
-
-    VBox card = new VBox(6, roleLabel, contentLabel);
+    VBox card = new VBox(6, contentArea);
     if (!turn.getEnvironment().isBlank()) {
       Label environmentLabel = new Label(turn.getEnvironment());
       environmentLabel.setWrapText(true);
       environmentLabel.setStyle("-fx-text-fill: #5f6368; -fx-font-size: 11px;");
-      card.getChildren().add(1, environmentLabel);
+      card.getChildren().add(0, environmentLabel);
     }
     card.setPadding(new Insets(10));
-    card.setStyle(cardStyle(turn.getRole(), highlighted));
-    return card;
+
+    TitledPane pane = new TitledPane(turnHeader(turn), card);
+    pane.setExpanded(!turn.isCollapsed());
+    pane.setStyle(cardStyle(turn.getRole(), highlighted));
+    return pane;
+  }
+
+  private TextArea selectableTextArea(String content) {
+    TextArea textArea = new TextArea(content);
+    textArea.setEditable(false);
+    textArea.setWrapText(true);
+    textArea.setPrefRowCount(Math.max(2, Math.min(14, content.split("\\R", -1).length + 1)));
+    return textArea;
   }
 
   private String turnHeader(ChatTurn turn) {
     StringBuilder header = new StringBuilder();
-    header.append(turn.getRole().getDisplayName()).append(" - line ").append(turn.getLineNumber());
+    header.append(turn.getRole().getDisplayName()).append(" - line ").append(turn.getSourceLineLabel());
     if (!turn.getTimestamp().isBlank()) {
       header.append(" - ").append(turn.getTimestamp());
     }
     return header.toString();
-  }
-
-  private TextArea chatContentArea(String content) {
-    TextArea textArea = new TextArea(emptyFallback(content));
-    textArea.setEditable(false);
-    textArea.setWrapText(true);
-    textArea.setPrefRowCount(8);
-    return textArea;
   }
 
   private String emptyFallback(String value) {
