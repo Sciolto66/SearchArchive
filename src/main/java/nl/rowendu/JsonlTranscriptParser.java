@@ -16,6 +16,9 @@ import java.util.Locale;
 import java.util.Map;
 
 final class JsonlTranscriptParser {
+  private static final System.Logger LOGGER =
+      System.getLogger(JsonlTranscriptParser.class.getName());
+
   private final ObjectMapper objectMapper = new ObjectMapper();
   private final ObjectWriter prettyJsonWriter = objectMapper.writerWithDefaultPrettyPrinter();
 
@@ -92,7 +95,8 @@ final class JsonlTranscriptParser {
   }
 
   boolean isSearchResultLine(String rawLine) {
-    return !isLowValueCodexLine(rawLine);
+    ChatTurn turn = parseLine(0, rawLine);
+    return turn != null && turn.getRole() != ChatRole.TOOL;
   }
 
   String sessionTitle(Path jsonlFile) throws IOException {
@@ -159,6 +163,7 @@ final class JsonlTranscriptParser {
       JsonNode root = objectMapper.readTree(rawLine);
       return parseJsonLine(lineNumber, root, rawLine);
     } catch (Exception e) {
+      LOGGER.log(System.Logger.Level.DEBUG, "Could not parse JSONL line " + lineNumber, e);
       return new ChatTurn(lineNumber, ChatRole.UNKNOWN, "", "", rawLine, false);
     }
   }
@@ -169,15 +174,6 @@ final class JsonlTranscriptParser {
       return parseCodexLine(lineNumber, root, rawLine, type);
     }
     return parseClaudeLine(lineNumber, root, rawLine, type);
-  }
-
-  private boolean isLowValueCodexLine(String rawLine) {
-    try {
-      JsonNode root = objectMapper.readTree(rawLine);
-      return isLowValueCodexRoot(root);
-    } catch (Exception e) {
-      return false;
-    }
   }
 
   private boolean isLowValueCodexRoot(JsonNode root) {
@@ -317,12 +313,20 @@ final class JsonlTranscriptParser {
   }
 
   private boolean isLowValueCodexResponseItem(JsonNode item) {
-    return isLowValueCodexFunctionCall(item) || isEmptyCodexReasoning(item);
+    return isLowValueCodexFunctionCall(item)
+        || isEmptyCodexReasoning(item)
+        || isInjectedCodexContextItem(item);
   }
 
   private boolean isEmptyCodexReasoning(JsonNode item) {
     return "reasoning".equals(text(item, "type"))
         && firstText(contentFrom(item.get("content")), reasoningSummary(item)).isBlank();
+  }
+
+  private boolean isInjectedCodexContextItem(JsonNode item) {
+    return "message".equals(text(item, "type"))
+        && "user".equals(text(item, "role"))
+        && isInjectedCodexContext(contentFrom(item.get("content")).trim().toLowerCase(Locale.ROOT));
   }
 
   private ChatRole roleForCodexEvent(String eventType) {

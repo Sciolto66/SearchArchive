@@ -1,7 +1,9 @@
 package nl.rowendu;
 
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.TreeSet;
 
 final class SearchResult {
@@ -10,7 +12,7 @@ final class SearchResult {
   private final String location;
   private final String title;
   private final int lineNumber;
-  private final Set<Integer> sourceLineNumbers;
+  private final SortedSet<Integer> sourceLineNumbers;
   private final String displayText;
   private final String rawContent;
 
@@ -49,7 +51,7 @@ final class SearchResult {
     this.location = location;
     this.title = title;
     this.lineNumber = lineNumber;
-    this.sourceLineNumbers = Set.copyOf(sourceLineNumbers);
+    this.sourceLineNumbers = sortedCopy(sourceLineNumbers);
     this.displayText = displayText;
     this.rawContent = rawContent;
   }
@@ -81,11 +83,15 @@ final class SearchResult {
     return lineNumber;
   }
 
+  boolean includesSourceLine(int sourceLineNumber) {
+    return sourceLineNumbers.contains(sourceLineNumber);
+  }
+
   String getLineLabel() {
     if (sourceLineNumbers.size() == 1) {
       return lineNumber > 0 ? Integer.toString(lineNumber) : "";
     }
-    return new TreeSet<>(sourceLineNumbers).stream()
+    return sourceLineNumbers.stream()
         .map(String::valueOf)
         .reduce((left, right) -> left + ", " + right)
         .orElse(Integer.toString(lineNumber));
@@ -97,5 +103,34 @@ final class SearchResult {
 
   String getRawContent() {
     return rawContent;
+  }
+
+  private SortedSet<Integer> sortedCopy(Set<Integer> values) {
+    return Collections.unmodifiableSortedSet(new TreeSet<>(values));
+  }
+
+  @Override
+  public String toString() {
+    return "SearchResult{"
+        + "mode="
+        + mode
+        + ", filePath="
+        + filePath
+        + ", location='"
+        + location
+        + '\''
+        + ", title='"
+        + title
+        + '\''
+        + ", lineNumber="
+        + lineNumber
+        + ", sourceLineNumbers="
+        + sourceLineNumbers
+        + ", displayText='"
+        + displayText
+        + '\''
+        + ", rawContentLength="
+        + rawContent.length()
+        + '}';
   }
 }

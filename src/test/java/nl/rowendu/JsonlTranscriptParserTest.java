@@ -224,6 +224,36 @@ class JsonlTranscriptParserTest {
   }
 
   @Test
+  void filtersInjectedCodexContextRecords() throws Exception {
+    Path transcriptFile = tempDir.resolve("codex-injected-context.jsonl");
+    Files.writeString(
+        transcriptFile,
+        """
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /repo\\n\\n<INSTRUCTIONS>\\nRepository guidance\\n</INSTRUCTIONS>\\n<environment_context>\\n  <cwd>/repo</cwd>\\n</environment_context>"}]}}
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Actual user request"}]}}
+        """);
+
+    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
+    List<ChatTurn> turns = transcript.getTurns();
+
+    assertEquals(1, turns.size());
+    assertEquals(ChatRole.USER, turns.get(0).getRole());
+    assertEquals("Actual user request", turns.get(0).getContent());
+    assertEquals(2, turns.get(0).getLineNumber());
+  }
+
+  @Test
+  void createsSameDedupeKeyForEquivalentCodexContent() {
+    JsonlTranscriptParser parser = new JsonlTranscriptParser();
+    String responseItem =
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"same codex payload\"}]}}";
+    String simpleMessage =
+        "{\"type\":\"message\",\"role\":\"developer\",\"content\":\"same   codex\\n payload\"}";
+
+    assertEquals(parser.dedupeKeyForRawLine(responseItem), parser.dedupeKeyForRawLine(simpleMessage));
+  }
+
+  @Test
   void keepsInvalidJsonLinesAsUnknownTurns() throws Exception {
     Path transcriptFile = tempDir.resolve("broken.jsonl");
     Files.writeString(transcriptFile, "not-json\n");

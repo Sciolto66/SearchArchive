@@ -1,11 +1,13 @@
 package nl.rowendu;
 
+import java.util.Collections;
 import java.util.Set;
+import java.util.SortedSet;
 import java.util.TreeSet;
 
 final class ChatTurn {
   private final int lineNumber;
-  private final Set<Integer> sourceLineNumbers;
+  private final SortedSet<Integer> sourceLineNumbers;
   private final ChatRole role;
   private final String timestamp;
   private final String environment;
@@ -31,7 +33,7 @@ final class ChatTurn {
       String content,
       boolean collapsed) {
     this.lineNumber = lineNumber;
-    this.sourceLineNumbers = Set.copyOf(sourceLineNumbers);
+    this.sourceLineNumbers = sortedCopy(sourceLineNumbers);
     this.role = role;
     this.timestamp = timestamp;
     this.environment = environment;
@@ -58,7 +60,7 @@ final class ChatTurn {
     if (sourceLineNumbers.size() == 1) {
       return Integer.toString(lineNumber);
     }
-    return new TreeSet<>(sourceLineNumbers).stream()
+    return sourceLineNumbers.stream()
         .map(String::valueOf)
         .reduce((left, right) -> left + ", " + right)
         .orElse(Integer.toString(lineNumber));
@@ -82,5 +84,31 @@ final class ChatTurn {
 
   boolean isCollapsed() {
     return collapsed;
+  }
+
+  private SortedSet<Integer> sortedCopy(Set<Integer> values) {
+    return Collections.unmodifiableSortedSet(new TreeSet<>(values));
+  }
+
+  @Override
+  public String toString() {
+    return "ChatTurn{"
+        + "lineNumber="
+        + lineNumber
+        + ", sourceLineNumbers="
+        + sourceLineNumbers
+        + ", role="
+        + role
+        + ", timestamp='"
+        + timestamp
+        + '\''
+        + ", environment='"
+        + environment
+        + '\''
+        + ", contentLength="
+        + content.length()
+        + ", collapsed="
+        + collapsed
+        + '}';
   }
 }
