@@ -422,7 +422,7 @@ public class ArchiveSearcher extends Application {
     turnList.setPadding(new Insets(12));
     AtomicReference<javafx.scene.Node> highlightedNode = new AtomicReference<>();
     for (ChatTurn turn : transcript.getTurns()) {
-      boolean highlighted = turn.includesSourceLine(selectedResult.getLineNumber());
+      boolean highlighted = turnMatchesResult(turn, selectedResult);
       javafx.scene.Node turnNode = createTurnNode(turn, highlighted);
       if (highlighted) {
         highlightedNode.set(turnNode);
@@ -440,6 +440,10 @@ public class ArchiveSearcher extends Application {
     stage.setScene(new Scene(root, 920, 720));
     stage.show();
     scrollToNode(scrollPane, turnList, highlightedNode.get());
+  }
+
+  private boolean turnMatchesResult(ChatTurn turn, SearchResult selectedResult) {
+    return turn.getLineNumber() > 0 && selectedResult.includesSourceLine(turn.getLineNumber());
   }
 
   private void scrollToNode(ScrollPane scrollPane, VBox content, javafx.scene.Node node) {

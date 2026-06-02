@@ -2,18 +2,23 @@ package nl.rowendu;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.stream.Stream;
 
 final class JsonlHistorySearcher {
+  private static final System.Logger LOGGER =
+      System.getLogger(JsonlHistorySearcher.class.getName());
+
   private final JsonlTranscriptParser jsonlTranscriptParser = new JsonlTranscriptParser();
 
   List<SearchResult> search(Path rootFolder, String searchText, CancellationToken token)
@@ -24,24 +29,58 @@ final class JsonlHistorySearcher {
 
     String needle = searchText.toLowerCase(Locale.ROOT);
     List<SearchResult> results = new ArrayList<>();
+    Map<Path, String> titleCache = new LinkedHashMap<>();
 
-    try (Stream<Path> paths = Files.walk(rootFolder)) {
-      List<Path> jsonlFiles =
-          paths
-              .filter(Files::isRegularFile)
-              .filter(JsonlHistorySearcher::isJsonlFile)
-              .sorted(Comparator.naturalOrder())
-              .toList();
+    Files.walkFileTree(
+        rootFolder,
+        new SimpleFileVisitor<>() {
+          @Override
+          public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+            return token.isCancelled() ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+          }
 
-      for (Path jsonlFile : jsonlFiles) {
-        if (token.isCancelled()) {
-          break;
-        }
-        searchFile(jsonlFile, needle, token, results);
-      }
-    }
+          @Override
+          public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+            if (token.isCancelled()) {
+              return FileVisitResult.TERMINATE;
+            }
+            if (attrs.isRegularFile() && isJsonlFile(file)) {
+              try {
+                searchFile(file, needle, token, titleCache, results);
+              } catch (IOException e) {
+                LOGGER.log(System.Logger.Level.WARNING, "Could not search JSONL file: " + file, e);
+              }
+            }
+            return token.isCancelled() ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+          }
+
+          @Override
+          public FileVisitResult visitFileFailed(Path file, IOException exc) {
+            LOGGER.log(
+                System.Logger.Level.WARNING,
+                "Could not access path during JSONL search: " + file,
+                exc);
+            return token.isCancelled() ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+          }
+        });
 
     return deduplicateResults(results);
+  }
+
+  private String titleFor(Path jsonlFile, Map<Path, String> titleCache) throws IOException {
+    try {
+      return titleCache.computeIfAbsent(jsonlFile, this::sessionTitleUnchecked);
+    } catch (UncheckedIOException e) {
+      throw e.getCause();
+    }
+  }
+
+  private String sessionTitleUnchecked(Path jsonlFile) {
+    try {
+      return jsonlTranscriptParser.sessionTitle(jsonlFile);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   private List<SearchResult> deduplicateResults(List<SearchResult> results) {
@@ -66,10 +105,14 @@ final class JsonlHistorySearcher {
   }
 
   private void searchFile(
-      Path jsonlFile, String needle, CancellationToken token, List<SearchResult> results)
+      Path jsonlFile,
+      String needle,
+      CancellationToken token,
+      Map<Path, String> titleCache,
+      List<SearchResult> results)
       throws IOException {
-    String title = null;
     try (BufferedReader reader = Files.newBufferedReader(jsonlFile, StandardCharsets.UTF_8)) {
+      String title = null;
       String line;
       int lineNumber = 0;
       while ((line = reader.readLine()) != null) {
@@ -80,7 +123,7 @@ final class JsonlHistorySearcher {
         if (line.toLowerCase(Locale.ROOT).contains(needle)
             && jsonlTranscriptParser.isSearchResultLine(line)) {
           if (title == null) {
-            title = jsonlTranscriptParser.sessionTitle(jsonlFile);
+            title = titleFor(jsonlFile, titleCache);
           }
           results.add(
               new SearchResult(

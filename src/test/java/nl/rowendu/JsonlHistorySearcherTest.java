@@ -46,6 +46,17 @@ class JsonlHistorySearcherTest {
   }
 
   @Test
+  void returnsNoResultsWhenCancelledBeforeTraversal() throws Exception {
+    Path history = tempDir.resolve("chat.jsonl");
+    Files.writeString(history, "{\"role\":\"user\",\"content\":\"codex match\"}\n");
+
+    JsonlHistorySearcher searcher = new JsonlHistorySearcher();
+    List<SearchResult> results = searcher.search(tempDir, "codex", () -> true);
+
+    assertEquals(0, results.size());
+  }
+
+  @Test
   void deduplicatesMatchingJsonlLinesInSameFile() throws Exception {
     Path history = tempDir.resolve("chat.jsonl");
     Files.writeString(
@@ -102,6 +113,40 @@ class JsonlHistorySearcherTest {
   }
 
   @Test
+  void excludesCodexToolRowsFromResultsEvenWhenTheyMatchSearchText() throws Exception {
+    Path history = tempDir.resolve("codex-tool.jsonl");
+    Files.writeString(
+        history,
+        """
+        {"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"rg SearchArchive\\"}","call_id":"call_1"}}
+        {"type":"event_msg","payload":{"type":"user_message","message":"Find SearchArchive references"}}
+        """);
+
+    JsonlHistorySearcher searcher = new JsonlHistorySearcher();
+    List<SearchResult> results = searcher.search(tempDir, "SearchArchive", () -> false);
+
+    assertEquals(1, results.size());
+    assertEquals(2, results.get(0).getLineNumber());
+  }
+
+  @Test
+  void excludesClaudeToolRowsFromResultsEvenWhenTheyMatchSearchText() throws Exception {
+    Path history = tempDir.resolve("claude-tool.jsonl");
+    Files.writeString(
+        history,
+        """
+        {"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"rg SearchArchive"}}]}}
+        {"type":"user","message":{"role":"user","content":[{"type":"text","text":"Find SearchArchive references"}]}}
+        """);
+
+    JsonlHistorySearcher searcher = new JsonlHistorySearcher();
+    List<SearchResult> results = searcher.search(tempDir, "SearchArchive", () -> false);
+
+    assertEquals(1, results.size());
+    assertEquals(2, results.get(0).getLineNumber());
+  }
+
+  @Test
   void addsCodexSessionTitleFromFirstUserPrompt() throws Exception {
     Path history = tempDir.resolve("codex-title.jsonl");
     Files.writeString(
@@ -138,6 +183,24 @@ class JsonlHistorySearcherTest {
   }
 
   @Test
+  void excludesInjectedCodexContextFromResults() throws Exception {
+    Path history = tempDir.resolve("codex-context-result.jsonl");
+    Files.writeString(
+        history,
+        """
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /repo\\n\\n<INSTRUCTIONS>\\nSearchArchive guidance\\n</INSTRUCTIONS>\\n<environment_context>\\n  <cwd>/repo/SearchArchive</cwd>\\n</environment_context>"}]}}
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Find SearchArchive JSONL matches"}]}}
+        """);
+
+    JsonlHistorySearcher searcher = new JsonlHistorySearcher();
+    List<SearchResult> results = searcher.search(tempDir, "SearchArchive", () -> false);
+
+    assertEquals(1, results.size());
+    assertEquals(2, results.get(0).getLineNumber());
+    assertEquals("Find SearchArchive JSONL matches", results.get(0).getTitle());
+  }
+
+  @Test
   void addsClaudeSessionTitleFromFirstMeaningfulUserPrompt() throws Exception {
     Path history = tempDir.resolve("claude-title.jsonl");
     Files.writeString(
@@ -152,6 +215,8 @@ class JsonlHistorySearcherTest {
     List<SearchResult> results = searcher.search(tempDir, "claude", () -> false);
 
     assertEquals(1, results.size());
+    assertEquals(history, results.get(0).getFilePath());
+    assertEquals(3, results.get(0).getLineNumber());
     assertEquals("Please analyze this codebase", results.get(0).getTitle());
   }
 }
