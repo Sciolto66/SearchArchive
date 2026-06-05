@@ -16,17 +16,24 @@ import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-final class ArchiveFileSearcher {
+final class ArchiveFileSearcher implements Searcher {
   private static final System.Logger LOGGER = System.getLogger(ArchiveFileSearcher.class.getName());
   private static final Set<String> SUPPORTED_EXTENSIONS =
       new HashSet<>(Arrays.asList(".zip", ".jar", ".ear", ".sar"));
   private static final String SKIP_DIRECTORY = "META-INF";
 
-  boolean isArchiveSupported(String fileName) {
+  @Override
+  public SearcherMode getMode() {
+    return SearcherMode.ARCHIVE_FILENAME;
+  }
+
+  @Override
+  public boolean isArchiveSupported(String fileName) {
     return SUPPORTED_EXTENSIONS.stream().anyMatch(ext -> fileName.toLowerCase().endsWith(ext));
   }
 
-  List<SearchResult> search(Path archivePath, String searchText, CancellationToken token)
+  @Override
+  public List<SearchResult> search(Path archivePath, String searchText, CancellationToken token)
       throws IOException {
     if (!isArchiveSupported(archivePath.toString())) {
       throw new IOException("Unsupported archive type.");
@@ -41,22 +48,13 @@ final class ArchiveFileSearcher {
     return results;
   }
 
-  private void searchInArchive(
-      File archiveFile,
-      Path originalArchivePath,
-      String searchFileLower,
-      String parentPath,
-      CancellationToken token,
-      List<SearchResult> results)
-      throws IOException {
-    LOGGER.log(
-        System.Logger.Level.INFO,
-        "Checking archive: {0}",
+  private void searchInArchive(File archiveFile, Path originalArchivePath, String searchFileLower,
+      String parentPath, CancellationToken token, List<SearchResult> results) throws IOException {
+    LOGGER.log(System.Logger.Level.INFO, "Checking archive: {0}",
         parentPath.isEmpty() ? archiveFile.getName() : parentPath);
 
     try (ZipFile zip = new ZipFile(archiveFile)) {
       Enumeration<? extends ZipEntry> entries = zip.entries();
-
       while (entries.hasMoreElements()) {
         if (token.isCancelled()) {
           LOGGER.log(System.Logger.Level.INFO, "Archive search cancelled.");
@@ -64,8 +62,7 @@ final class ArchiveFileSearcher {
         }
 
         ZipEntry entry = entries.nextElement();
-        String currentPath =
-            parentPath.isEmpty() ? entry.getName() : parentPath + "/" + entry.getName();
+        String currentPath = parentPath.isEmpty() ? entry.getName() : parentPath + "/" + entry.getName();
 
         if (entry.isDirectory()) {
           LOGGER.log(System.Logger.Level.DEBUG, () -> "Traversing folder: " + currentPath);
@@ -74,24 +71,18 @@ final class ArchiveFileSearcher {
 
         String fileNameLower = new File(entry.getName()).getName().toLowerCase();
         if (fileNameLower.contains(searchFileLower)) {
-          results.add(
-              new SearchResult(
-                  SearchMode.ARCHIVE_FILENAME,
-                  originalArchivePath,
-                  currentPath,
-                  0,
-                  currentPath,
-                  ""));
+          results.add(new SearchResult(getMode(), originalArchivePath, currentPath,
+              0, currentPath, ""));
         }
 
         if (isArchiveSupported(entry.getName())) {
           if (entry.getName().startsWith(SKIP_DIRECTORY + "/")) {
-            LOGGER.log(
-                System.Logger.Level.DEBUG, () -> "Skipping META-INF archive: " + currentPath);
+            LOGGER.log(System.Logger.Level.DEBUG,
+                () -> "Skipping META-INF archive: " + currentPath);
             continue;
           }
-          processNestedArchive(
-              zip, entry, originalArchivePath, searchFileLower, currentPath, token, results);
+          processNestedArchive(zip, entry, originalArchivePath, searchFileLower,
+              currentPath, token, results);
         }
       }
     } catch (IOException e) {
@@ -101,24 +92,20 @@ final class ArchiveFileSearcher {
     }
   }
 
-  private void processNestedArchive(
-      ZipFile zip,
-      ZipEntry entry,
-      Path originalArchivePath,
-      String searchFileLower,
-      String currentPath,
-      CancellationToken token,
+  private void processNestedArchive(ZipFile zip, ZipEntry entry, Path originalArchivePath,
+      String searchFileLower, String currentPath, CancellationToken token,
       List<SearchResult> results) {
     try {
       Path tempFile = extractToTempFile(zip, entry);
       try {
-        searchInArchive(
-            tempFile.toFile(), originalArchivePath, searchFileLower, currentPath, token, results);
+        searchInArchive(tempFile.toFile(), originalArchivePath, searchFileLower,
+            currentPath, token, results);
       } finally {
         deleteTempFile(tempFile);
       }
     } catch (Exception e) {
-      LOGGER.log(System.Logger.Level.ERROR, "Failed to process nested archive: " + currentPath, e);
+      LOGGER.log(System.Logger.Level.ERROR,
+          "Failed to process nested archive: " + currentPath, e);
     }
   }
 
@@ -139,10 +126,8 @@ final class ArchiveFileSearcher {
     try {
       Files.delete(tempFile);
     } catch (NoSuchFileException ignored) {
-      // Already removed.
     } catch (IOException e) {
-      LOGGER.log(
-          System.Logger.Level.WARNING,
+      LOGGER.log(System.Logger.Level.WARNING,
           "Failed to delete temporary file " + tempFile + ": " + e.getMessage());
     }
   }

@@ -2,7 +2,6 @@ package nl.rowendu;
 
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -15,13 +14,20 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-final class JsonlHistorySearcher {
+final class JsonlHistorySearcher implements Searcher {
   private static final System.Logger LOGGER =
       System.getLogger(JsonlHistorySearcher.class.getName());
 
-  private final JsonlTranscriptParser jsonlTranscriptParser = new JsonlTranscriptParser();
+  private final TranscriptNoiseFilter noiseFilter = new TranscriptNoiseFilter();
+  private final JsonlTranscriptParser transcriptParser = new JsonlTranscriptParser();
 
-  List<SearchResult> search(Path rootFolder, String searchText, CancellationToken token)
+  @Override
+  public SearcherMode getMode() {
+    return SearcherMode.JSONL_HISTORY;
+  }
+
+  @Override
+  public List<SearchResult> search(Path rootFolder, String searchText, CancellationToken token)
       throws IOException {
     if (!Files.isDirectory(rootFolder)) {
       throw new IOException("History folder does not exist: " + rootFolder);
@@ -41,9 +47,7 @@ final class JsonlHistorySearcher {
 
           @Override
           public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-            if (token.isCancelled()) {
-              return FileVisitResult.TERMINATE;
-            }
+            if (token.isCancelled()) return FileVisitResult.TERMINATE;
             if (attrs.isRegularFile() && isJsonlFile(file)) {
               try {
                 searchFile(file, needle, token, titleCache, results);
@@ -56,10 +60,8 @@ final class JsonlHistorySearcher {
 
           @Override
           public FileVisitResult visitFileFailed(Path file, IOException exc) {
-            LOGGER.log(
-                System.Logger.Level.WARNING,
-                "Could not access path during JSONL search: " + file,
-                exc);
+            LOGGER.log(System.Logger.Level.WARNING,
+                "Could not access path during JSONL search: " + file, exc);
             return token.isCancelled() ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
           }
         });
@@ -67,34 +69,15 @@ final class JsonlHistorySearcher {
     return deduplicateResults(results);
   }
 
-  private String titleFor(Path jsonlFile, Map<Path, String> titleCache) throws IOException {
-    try {
-      return titleCache.computeIfAbsent(jsonlFile, this::sessionTitleUnchecked);
-    } catch (UncheckedIOException e) {
-      throw e.getCause();
-    }
-  }
-
-  private String sessionTitleUnchecked(Path jsonlFile) {
-    try {
-      return jsonlTranscriptParser.sessionTitle(jsonlFile);
-    } catch (IOException e) {
-      throw new UncheckedIOException(e);
-    }
-  }
-
   private List<SearchResult> deduplicateResults(List<SearchResult> results) {
     Map<String, SearchResult> uniqueResults = new LinkedHashMap<>();
     for (SearchResult result : results) {
-      String key =
-          result.getFilePath()
-              + "\n"
-              + jsonlTranscriptParser.dedupeKeyForRawLine(result.getRawContent());
-      SearchResult existingResult = uniqueResults.get(key);
-      if (existingResult == null) {
+      String key = result.getFilePath() + "\n" + noiseFilter.dedupeKeyForRawLine(result.getRawContent());
+      SearchResult existing = uniqueResults.get(key);
+      if (existing == null) {
         uniqueResults.put(key, result);
       } else {
-        uniqueResults.put(key, existingResult.withAdditionalSourceLine(result.getLineNumber()));
+        uniqueResults.put(key, existing.withAdditionalSourceLine(result.getLineNumber()));
       }
     }
     return new ArrayList<>(uniqueResults.values());
@@ -104,46 +87,39 @@ final class JsonlHistorySearcher {
     return path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jsonl");
   }
 
-  private void searchFile(
-      Path jsonlFile,
-      String needle,
-      CancellationToken token,
-      Map<Path, String> titleCache,
-      List<SearchResult> results)
+  private void searchFile(Path jsonlFile, String needle, CancellationToken token,
+                          Map<Path, String> titleCache, List<SearchResult> results)
       throws IOException {
     try (BufferedReader reader = Files.newBufferedReader(jsonlFile, StandardCharsets.UTF_8)) {
       String title = null;
       String line;
       int lineNumber = 0;
       while ((line = reader.readLine()) != null) {
-        if (token.isCancelled()) {
-          return;
-        }
+        if (token.isCancelled()) return;
         lineNumber++;
-        if (line.toLowerCase(Locale.ROOT).contains(needle)
-            && jsonlTranscriptParser.isSearchResultLine(line)) {
-          if (title == null) {
-            title = titleFor(jsonlFile, titleCache);
-          }
-          results.add(
-              new SearchResult(
-                  SearchMode.JSONL_HISTORY,
-                  jsonlFile,
-                  jsonlFile.toString(),
-                  title,
-                  lineNumber,
-                  preview(line),
-                  line));
+        if (line.toLowerCase(Locale.ROOT).contains(needle) && noiseFilter.isSearchResultLine(line)) {
+          if (title == null) title = titleFor(jsonlFile, titleCache);
+          results.add(new SearchResult(
+              getMode(), jsonlFile, jsonlFile.toString(), title, lineNumber,
+              preview(line), line));
         }
       }
     }
   }
 
+  private String titleFor(Path jsonlFile, Map<Path, String> titleCache) throws IOException {
+    return titleCache.computeIfAbsent(jsonlFile, f -> {
+      try {
+        return transcriptParser.sessionTitle(f);
+      } catch (IOException e) {
+        throw new java.io.UncheckedIOException(e);
+      }
+    });
+  }
+
   private String preview(String line) {
     String compact = line.trim().replaceAll("\\s+", " ");
-    if (compact.length() <= 180) {
-      return compact;
-    }
+    if (compact.length() <= 180) return compact;
     return compact.substring(0, 177) + "...";
   }
 }
