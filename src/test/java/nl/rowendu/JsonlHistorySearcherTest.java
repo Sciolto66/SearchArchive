@@ -1,10 +1,17 @@
 package nl.rowendu;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -130,6 +137,24 @@ class JsonlHistorySearcherTest {
   }
 
   @Test
+  void excludesCodexShellRowsFromResultsEvenWhenTheyMatchSearchText() throws Exception {
+    Path history = tempDir.resolve("codex-shell.jsonl");
+    Files.writeString(
+        history,
+        """
+        {"type":"response_item","payload":{"type":"local_shell_call","action":{"type":"exec","command":["rg","SearchArchive"]}}}
+        {"type":"event_msg","payload":{"type":"exec_command_end","command":["rg","SearchArchive"],"aggregated_output":"SearchArchive match"}}
+        {"type":"event_msg","payload":{"type":"user_message","message":"Find SearchArchive references"}}
+        """);
+
+    JsonlHistorySearcher searcher = new JsonlHistorySearcher();
+    List<SearchResult> results = searcher.search(tempDir, "SearchArchive", () -> false);
+
+    assertEquals(1, results.size());
+    assertEquals(3, results.get(0).getLineNumber());
+  }
+
+  @Test
   void excludesClaudeToolRowsFromResultsEvenWhenTheyMatchSearchText() throws Exception {
     Path history = tempDir.resolve("claude-tool.jsonl");
     Files.writeString(
@@ -218,5 +243,26 @@ class JsonlHistorySearcherTest {
     assertEquals(history, results.get(0).getFilePath());
     assertEquals(3, results.get(0).getLineNumber());
     assertEquals("Please analyze this codebase", results.get(0).getTitle());
+  }
+
+  @Test
+  void titleForUnwrapsUncheckedIOExceptionFromCacheComputation() throws Exception {
+    JsonlHistorySearcher searcher = new JsonlHistorySearcher();
+    Path history = tempDir.resolve("chat.jsonl");
+    Map<Path, String> failingCache = new LinkedHashMap<>() {
+      @Override
+      public String computeIfAbsent(Path key,
+          java.util.function.Function<? super Path, ? extends String> mappingFunction) {
+        throw new UncheckedIOException(new IOException("title read failed"));
+      }
+    };
+
+    Method titleFor = JsonlHistorySearcher.class.getDeclaredMethod("titleFor", Path.class, Map.class);
+    titleFor.setAccessible(true);
+
+    InvocationTargetException thrown = assertThrows(InvocationTargetException.class,
+        () -> titleFor.invoke(searcher, history, failingCache));
+    assertEquals(IOException.class, thrown.getCause().getClass());
+    assertEquals("title read failed", thrown.getCause().getMessage());
   }
 }

@@ -2,6 +2,7 @@ package nl.rowendu;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -46,7 +47,7 @@ final class JsonlHistorySearcher implements Searcher {
           }
 
           @Override
-          public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+          public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
             if (token.isCancelled()) return FileVisitResult.TERMINATE;
             if (attrs.isRegularFile() && isJsonlFile(file)) {
               try {
@@ -108,13 +109,17 @@ final class JsonlHistorySearcher implements Searcher {
   }
 
   private String titleFor(Path jsonlFile, Map<Path, String> titleCache) throws IOException {
-    return titleCache.computeIfAbsent(jsonlFile, f -> {
-      try {
-        return transcriptParser.sessionTitle(f);
-      } catch (IOException e) {
-        throw new java.io.UncheckedIOException(e);
-      }
-    });
+    try {
+      return titleCache.computeIfAbsent(jsonlFile, f -> {
+        try {
+          return transcriptParser.sessionTitle(f);
+        } catch (IOException e) {
+          throw new UncheckedIOException(e);
+        }
+      });
+    } catch (UncheckedIOException e) {
+      throw e.getCause();
+    }
   }
 
   private String preview(String line) {

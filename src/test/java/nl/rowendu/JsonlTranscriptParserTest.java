@@ -7,8 +7,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 class JsonlTranscriptParserTest {
   @TempDir Path tempDir;
@@ -34,15 +38,11 @@ class JsonlTranscriptParserTest {
     assertEquals("Here are the results\n\nSecond block", turns.get(1).getContent());
   }
 
-  @Test
-  void filtersClaudeToolUseAndToolResultBlocks() throws Exception {
-    Path transcriptFile = tempDir.resolve("claude-tools.jsonl");
-    Files.writeString(
-        transcriptFile,
-        """
-        {"type":"assistant","timestamp":"2026-05-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"rg codex"}}]}}
-        {"type":"user","timestamp":"2026-05-25T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"found match"}]}}
-        """);
+  @ParameterizedTest
+  @MethodSource("fullyFilteredTranscripts")
+  void filtersTranscriptsWithOnlyNoiseRecords(String caseName, String content) throws Exception {
+    Path transcriptFile = tempDir.resolve(caseName + ".jsonl");
+    Files.writeString(transcriptFile, content);
 
     ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
     List<ChatTurn> turns = transcript.getTurns();
@@ -50,15 +50,35 @@ class JsonlTranscriptParserTest {
     assertEquals(0, turns.size());
   }
 
-  @Test
-  void filtersClaudeFileHistorySnapshots() throws Exception {
-    Path transcriptFile = tempDir.resolve("claude-snapshot.jsonl");
-    Files.writeString(
-        transcriptFile,
-        """
-        {"type":"file-history-snapshot","timestamp":"2026-05-25T10:00:00Z","content":"snapshot data"}
-        {"type":"assistant","timestamp":"2026-05-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"visible message"}]}}
-        """);
+  private static Stream<Arguments> fullyFilteredTranscripts() {
+    return Stream.of(
+        Arguments.of("claude-tools",
+            """
+            {"type":"assistant","timestamp":"2026-05-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"rg codex"}}]}}
+            {"type":"user","timestamp":"2026-05-25T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"found match"}]}}
+            """),
+        Arguments.of("codex-function-calls",
+            """
+            {"timestamp":"2026-05-25T15:57:11.679Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"rg --files\\",\\"workdir\\":\\"/repo\\"}","call_id":"call_1"}}
+            {"timestamp":"2026-05-25T15:57:11.682Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"git status --short\\",\\"workdir\\":\\"/repo\\"}","call_id":"call_2"}}
+            {"type":"event_msg","payload":{"type":"exec_command_end","aggregated_output":"src/App.java"}}
+            """),
+        Arguments.of("codex-shell",
+            """
+            {"type":"response_item","payload":{"type":"local_shell_call","action":{"type":"exec","command":["rg","codex"],"working_directory":"/repo"},"status":"completed"}}
+            {"type":"event_msg","payload":{"type":"exec_command_end","command":["rg","codex"],"aggregated_output":"src/App.java:codex"}}
+            """));
+  }
+
+  @ParameterizedTest
+  @MethodSource("claudeNoiseRecords")
+  void filtersClaudeNoiseRecords(String caseName, String noiseRecord) throws Exception {
+    Path transcriptFile = tempDir.resolve("claude-" + caseName + ".jsonl");
+    Files.writeString(transcriptFile,
+        noiseRecord + "\n"
+            + """
+            {"type":"assistant","timestamp":"2026-05-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"visible message"}]}}
+            """);
 
     ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
     List<ChatTurn> turns = transcript.getTurns();
@@ -68,58 +88,16 @@ class JsonlTranscriptParserTest {
     assertEquals("visible message", turns.get(0).getContent());
   }
 
-  @Test
-  void filtersClaudeProgressRecords() throws Exception {
-    Path transcriptFile = tempDir.resolve("claude-progress.jsonl");
-    Files.writeString(
-        transcriptFile,
-        """
-        {"type":"progress","data":{"type":"hook_progress","hookEvent":"PostToolUse","hookName":"PostToolUse:Glob","command":"callback"}}
-        {"type":"assistant","timestamp":"2026-05-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"visible message"}]}}
-        """);
-
-    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
-    List<ChatTurn> turns = transcript.getTurns();
-
-    assertEquals(1, turns.size());
-    assertEquals(ChatRole.ASSISTANT, turns.get(0).getRole());
-    assertEquals("visible message", turns.get(0).getContent());
-  }
-
-  @Test
-  void filtersClaudeTurnDurationSystemRecords() throws Exception {
-    Path transcriptFile = tempDir.resolve("claude-duration.jsonl");
-    Files.writeString(
-        transcriptFile,
-        """
-        {"type":"system","subtype":"turn_duration","durationMs":46883,"messageCount":19}
-        {"type":"assistant","timestamp":"2026-05-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"visible message"}]}}
-        """);
-
-    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
-    List<ChatTurn> turns = transcript.getTurns();
-
-    assertEquals(1, turns.size());
-    assertEquals(ChatRole.ASSISTANT, turns.get(0).getRole());
-    assertEquals("visible message", turns.get(0).getContent());
-  }
-
-  @Test
-  void filtersClaudeBlankAssistantMessages() throws Exception {
-    Path transcriptFile = tempDir.resolve("claude-blank.jsonl");
-    Files.writeString(
-        transcriptFile,
-        """
-        {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"\\n\\n"}]}}
-        {"type":"assistant","timestamp":"2026-05-25T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"visible message"}]}}
-        """);
-
-    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
-    List<ChatTurn> turns = transcript.getTurns();
-
-    assertEquals(1, turns.size());
-    assertEquals(ChatRole.ASSISTANT, turns.get(0).getRole());
-    assertEquals("visible message", turns.get(0).getContent());
+  private static Stream<Arguments> claudeNoiseRecords() {
+    return Stream.of(
+        Arguments.of("snapshot",
+            "{\"type\":\"file-history-snapshot\",\"timestamp\":\"2026-05-25T10:00:00Z\",\"content\":\"snapshot data\"}"),
+        Arguments.of("progress",
+            "{\"type\":\"progress\",\"data\":{\"type\":\"hook_progress\",\"hookEvent\":\"PostToolUse\",\"hookName\":\"PostToolUse:Glob\",\"command\":\"callback\"}}"),
+        Arguments.of("duration",
+            "{\"type\":\"system\",\"subtype\":\"turn_duration\",\"durationMs\":46883,\"messageCount\":19}"),
+        Arguments.of("blank",
+            "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"\\n\\n\"}]}}"));
   }
 
   @Test
@@ -149,39 +127,6 @@ class JsonlTranscriptParserTest {
   }
 
   @Test
-  void skipsCodexFunctionCallRequestsWithoutResults() throws Exception {
-    Path transcriptFile = tempDir.resolve("codex-function-calls.jsonl");
-    Files.writeString(
-        transcriptFile,
-        """
-        {"timestamp":"2026-05-25T15:57:11.679Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"rg --files\\",\\"workdir\\":\\"/repo\\"}","call_id":"call_1"}}
-        {"timestamp":"2026-05-25T15:57:11.682Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"git status --short\\",\\"workdir\\":\\"/repo\\"}","call_id":"call_2"}}
-        {"type":"event_msg","payload":{"type":"exec_command_end","aggregated_output":"src/App.java"}}
-        """);
-
-    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
-    List<ChatTurn> turns = transcript.getTurns();
-
-    assertEquals(0, turns.size());
-  }
-
-  @Test
-  void filtersCodexShellAndCommandOutputRecords() throws Exception {
-    Path transcriptFile = tempDir.resolve("codex-shell.jsonl");
-    Files.writeString(
-        transcriptFile,
-        """
-        {"type":"response_item","payload":{"type":"local_shell_call","action":{"type":"exec","command":["rg","codex"],"working_directory":"/repo"},"status":"completed"}}
-        {"type":"event_msg","payload":{"type":"exec_command_end","command":["rg","codex"],"aggregated_output":"src/App.java:codex"}}
-        """);
-
-    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
-    List<ChatTurn> turns = transcript.getTurns();
-
-    assertEquals(0, turns.size());
-  }
-
-  @Test
   void filtersEmptyCodexTaskStartedTokenCountAgentReasoningAndReasoningRecords() throws Exception {
     Path transcriptFile = tempDir.resolve("codex-empty.jsonl");
     Files.writeString(
@@ -200,6 +145,60 @@ class JsonlTranscriptParserTest {
     assertEquals(1, turns.size());
     assertEquals(ChatRole.USER, turns.get(0).getRole());
     assertEquals("Visible codex request", turns.get(0).getContent());
+  }
+
+  @Test
+  void keepsCodexReasoningRecordsWithVisibleSummaryBlocks() throws Exception {
+    Path transcriptFile = tempDir.resolve("codex-visible-reasoning.jsonl");
+    Files.writeString(
+        transcriptFile,
+        """
+        {"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"text","text":"Visible reasoning summary"}],"content":null}}
+        """);
+
+    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
+    List<ChatTurn> turns = transcript.getTurns();
+
+    assertEquals(1, turns.size());
+    assertEquals(ChatRole.SYSTEM, turns.get(0).getRole());
+    assertEquals("Visible reasoning summary", turns.get(0).getContent());
+  }
+
+  @Test
+  void keepsCodexTaskStartedEventsWithVisibleCommandOrContent() throws Exception {
+    Path transcriptFile = tempDir.resolve("codex-visible-task-started.jsonl");
+    Files.writeString(
+        transcriptFile,
+        """
+        {"type":"event_msg","payload":{"type":"task_started","command":["rg","codex"]}}
+        {"type":"event_msg","payload":{"type":"task_started","content":[{"type":"output_text","text":"Preparing visible codex task"}]}}
+        """);
+
+    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
+    List<ChatTurn> turns = transcript.getTurns();
+
+    assertEquals(2, turns.size());
+    assertEquals(ChatRole.SYSTEM, turns.get(0).getRole());
+    assertEquals("Command: rg codex", turns.get(0).getContent());
+    assertEquals(ChatRole.SYSTEM, turns.get(1).getRole());
+    assertEquals("Preparing visible codex task", turns.get(1).getContent());
+  }
+
+  @Test
+  void keepsCodexTaskStartedEventsWithVisibleToolCallContent() throws Exception {
+    Path transcriptFile = tempDir.resolve("codex-visible-task-started-tool.jsonl");
+    Files.writeString(
+        transcriptFile,
+        """
+        {"type":"event_msg","payload":{"type":"task_started","content":[{"type":"function_call","name":"exec_command","arguments":"{\\"cmd\\":\\"rg codex\\"}"}]}}
+        """);
+
+    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
+    List<ChatTurn> turns = transcript.getTurns();
+
+    assertEquals(1, turns.size());
+    assertEquals(ChatRole.SYSTEM, turns.get(0).getRole());
+    assertEquals("[Tool call: exec_command]\n{\"cmd\":\"rg codex\"}", turns.get(0).getContent());
   }
 
   @Test
@@ -231,6 +230,25 @@ class JsonlTranscriptParserTest {
         """
         {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /repo\\n\\n<INSTRUCTIONS>\\nRepository guidance\\n</INSTRUCTIONS>\\n<environment_context>\\n  <cwd>/repo</cwd>\\n</environment_context>"}]}}
         {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Actual user request"}]}}
+        """);
+
+    ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);
+    List<ChatTurn> turns = transcript.getTurns();
+
+    assertEquals(1, turns.size());
+    assertEquals(ChatRole.USER, turns.get(0).getRole());
+    assertEquals("Actual user request", turns.get(0).getContent());
+    assertEquals(2, turns.get(0).getLineNumber());
+  }
+
+  @Test
+  void filtersInjectedCodexContextRecordsWithStringContent() throws Exception {
+    Path transcriptFile = tempDir.resolve("codex-injected-context-string.jsonl");
+    Files.writeString(
+        transcriptFile,
+        """
+        {"type":"response_item","payload":{"type":"message","role":"user","content":"# AGENTS.md instructions for /repo\\n\\n<INSTRUCTIONS>\\nRepository guidance\\n</INSTRUCTIONS>\\n<environment_context>\\n  <cwd>/repo</cwd>\\n</environment_context>"}}
+        {"type":"response_item","payload":{"type":"message","role":"user","content":"Actual user request"}}
         """);
 
     ChatTranscript transcript = new JsonlTranscriptParser().parse(transcriptFile);

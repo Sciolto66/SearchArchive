@@ -7,9 +7,7 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.MenuItem;
-import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.ScrollPane;
-import javafx.scene.control.TableRow;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TitledPane;
 import javafx.geometry.Insets;
@@ -21,7 +19,6 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
-import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 final class ResultRenderer {
@@ -40,25 +37,6 @@ final class ResultRenderer {
   public ResultRenderer(JsonlTranscriptParser transcriptParser, ErrorReporter errorReporter) {
     this.transcriptParser = transcriptParser;
     this.errorReporter = errorReporter;
-  }
-
-  void configureRowFactory(TableRow<SearchResult> row, Runnable onDoubleClick, Runnable onContextMenu) {
-    // wiring is done in ArchiveSearcher; this is a no-op placeholder for future extension
-  }
-
-  Node createRowHandler(TableRow<SearchResult> row, Runnable onDoubleClick, Runnable onContextMenu) {
-    row.setOnMouseClicked(event -> {
-      if (!row.isEmpty() && event.getButton() == javafx.scene.input.MouseButton.PRIMARY
-          && event.getClickCount() == 2) {
-        onDoubleClick.run();
-      }
-    });
-    row.setOnContextMenuRequested(event -> {
-      if (!row.isEmpty()) {
-        onContextMenu.run();
-      }
-    });
-    return row;
   }
 
   void showResult(SearchResult result) {

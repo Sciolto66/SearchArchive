@@ -20,7 +20,6 @@ import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
-import javafx.scene.input.ContextMenuEvent;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
@@ -56,16 +55,15 @@ public class ArchiveSearcher extends Application {
   private Label pathLabel;
   private TextField searchTextField;
   private TextField pathField;
-  private Button browseButton;
   private Button startButton;
-  private Button cancelButton;
-  private ProgressIndicator progressIndicator;
   private TableView<SearchResult> resultsTable;
   private Task<List<SearchResult>> currentSearchTask;
 
   public static void main(String[] args) {
     File appDir = new File(System.getProperty("user.home"), ".archivesearcher");
-    if (!appDir.exists()) appDir.mkdirs();
+    if (!appDir.exists() && !appDir.mkdirs()) {
+      throw new IllegalStateException("Could not create application directory: " + appDir);
+    }
 
     try (InputStream is = ArchiveSearcher.class.getResourceAsStream("/logging.properties")) {
       if (is != null) {
@@ -101,18 +99,19 @@ public class ArchiveSearcher extends Application {
     pathField.setEditable(false);
     pathField.setPrefWidth(520);
 
-    browseButton = new Button("Browse...");
+    Button browseButton = new Button("Browse...");
     browseButton.setOnAction(e -> choosePath(primaryStage));
 
     startButton = new Button("Start Search");
     startButton.setOnAction(e -> runSearchTask());
 
-    cancelButton = new Button("Cancel");
+    Button cancelButton = new Button("Cancel");
+    cancelButton.setDisable(true);
     cancelButton.setOnAction(e -> {
       if (currentSearchTask != null) currentSearchTask.cancel();
     });
 
-    progressIndicator = new ProgressIndicator();
+    ProgressIndicator progressIndicator = new ProgressIndicator();
     progressIndicator.setVisible(false);
     progressIndicator.setPrefSize(20, 20);
 
@@ -146,6 +145,7 @@ public class ArchiveSearcher extends Application {
       searchTextField.setDisable(nowRunning);
       pathField.setDisable(nowRunning);
       browseButton.setDisable(nowRunning);
+      startButton.setDisable(nowRunning);
       cancelButton.setDisable(!nowRunning);
       progressIndicator.setVisible(nowRunning);
       if (!nowRunning) updateButtonState();
@@ -188,7 +188,9 @@ public class ArchiveSearcher extends Application {
         new ReadOnlyStringWrapper(data.getValue().getLineLabel()));
     lineColumn.setPrefWidth(70);
 
-    table.getColumns().addAll(titleColumn, fileColumn, lineColumn);
+    table.getColumns().add(titleColumn);
+    table.getColumns().add(fileColumn);
+    table.getColumns().add(lineColumn);
 
     table.setRowFactory(view -> {
       javafx.scene.control.TableRow<SearchResult> row = new javafx.scene.control.TableRow<>();
@@ -292,7 +294,7 @@ public class ArchiveSearcher extends Application {
     currentSearchTask = new Task<>() {
       @Override
       protected List<SearchResult> call() throws Exception {
-        CancellationToken token = () -> currentSearchTask.isCancelled();
+        CancellationToken token = this::isCancelled;
         return searcher.search(selectedPath, searchText, token);
       }
 

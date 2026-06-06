@@ -2,130 +2,29 @@ package nl.rowendu;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+
+import java.util.ArrayList;
+import java.util.List;
 
 final class TranscriptNoiseFilter {
   private static final ObjectMapper MAPPER = new ObjectMapper();
+  private static final ObjectWriter PRETTY_JSON_WRITER = MAPPER.writerWithDefaultPrettyPrinter();
+  private final JsonlLineParser lineParser = new JsonlLineParser();
 
   boolean isSearchResultLine(String rawLine) {
-    JsonNode root = parseSafe(rawLine);
-    if (root == null) return false;
-    return !isLowValueCodexRoot(root) && !isNoiseLine(root);
+    ChatTurn turn = lineParser.parseLine(0, rawLine);
+    return turn != null && turn.getRole() != ChatRole.TOOL;
   }
 
   String dedupeKeyForRawLine(String rawLine) {
-    JsonNode root = parseSafe(rawLine);
-    if (root != null) {
-      ChatRole role = extractRole(root);
-      String content = extractContent(root);
-      String environment = extractEnvironment(root);
-      return role.name() + "\n" + normalize(content) + "\n" + normalize(environment);
-    }
-    return normalize(rawLine);
-  }
-
-  private JsonNode parseSafe(String rawLine) {
-    try {
-      return MAPPER.readTree(rawLine);
-    } catch (Exception e) {
-      return null;
-    }
-  }
-
-  private ChatRole extractRole(JsonNode root) {
-    String type = t(root, "type");
-
-    // Codex rollout types: delegate to codex role extraction
-    if (isCodexRolloutType(type)) {
-      return extractCodexRole(root, type);
-    }
-
-    // Simple message format: {"type":"message","role":"developer","content":"..."}
-    if ("message".equals(type)) {
-      String role = t(root, "role");
-      return roleFromString(role);
-    }
-
-    // Claude-style: role in message sub-object or root
-    JsonNode message = obj(root, "message");
-    String role = t(message, "role");
-    if (role.isBlank()) role = t(root, "role");
-    if (role.isBlank()) role = type;
-    return roleFromString(role);
-  }
-
-  private ChatRole extractCodexRole(JsonNode root, String type) {
-    JsonNode payload = obj(root, "payload");
-    JsonNode item = firstObj(obj(payload, "item"), obj(payload, "response_item"));
-
-    if ("event_msg".equals(type)) {
-      return roleForEvent(t(payload, "type"));
-    }
-
-    // response_item, session_meta, compacted
-    if (item != null && !item.isMissingNode()) {
-      String it = t(item, "type").toLowerCase(java.util.Locale.ROOT);
-      String role = t(item, "role").toLowerCase(java.util.Locale.ROOT);
-      if ("message".equals(it)) return roleFromString(role);
-      if ("reasoning".equals(it) || it.contains("compaction")) return ChatRole.SYSTEM;
-      if (isToolType(it)) return ChatRole.TOOL;
-    }
-    return ChatRole.SYSTEM;
-  }
-
-  private String extractContent(JsonNode root) {
-    String type = t(root, "type");
-
-    // Codex response_item
-    if ("response_item".equals(type)) {
-      JsonNode payload = obj(root, "payload");
-      JsonNode item = firstObj(obj(payload, "item"), obj(payload, "response_item"), payload);
-      String content = contentFrom(item.get("content"));
-      if (!content.isBlank()) return content;
-      return t(item, "text");
-    }
-
-    // Codex event_msg
-    if ("event_msg".equals(type)) {
-      JsonNode payload = obj(root, "payload");
-      return firstText(t(payload, "message"), t(payload, "last_agent_message"),
-          t(payload, "aggregated_output"), contentFrom(payload.get("content")),
-          contentFrom(payload.get("output")));
-    }
-
-    // Simple message: {"type":"message","role":"developer","content":"..."}
-    if ("message".equals(type)) {
-      return contentFrom(root.get("content"));
-    }
-
-    // Claude-style
-    JsonNode message = obj(root, "message");
-    String content = contentFrom(message.get("content"));
-    if (!content.isBlank()) return content;
-    return contentFrom(root.get("content"));
-  }
-
-  private String contentFrom(JsonNode node) {
-    if (node == null || node.isMissingNode() || node.isNull()) return "";
-    if (node.isTextual()) return node.asText();
-    if (node.isArray()) {
-      StringBuilder sb = new StringBuilder();
-      for (JsonNode child : node) {
-        String bt = t(child, "type");
-        if ("text".equals(bt) || "input_text".equals(bt) || "output_text".equals(bt)) {
-          String v = firstText(t(child, "text"), t(child, "content"));
-          if (!v.isBlank()) { if (sb.length() > 0) sb.append("\n\n"); sb.append(v); }
-        }
-      }
-      return sb.toString();
-    }
-    if (node.isObject()) {
-      return firstText(t(node, "text"), t(node, "content"));
-    }
-    return "";
-  }
-
-  private String extractEnvironment(JsonNode root) {
-    return firstText(t(obj(root, "payload"), "cwd"), t(root, "cwd"));
+    ChatTurn turn = lineParser.parseLine(0, rawLine);
+    if (turn == null) return normalize(rawLine);
+    return turn.getRole().name()
+        + "\n"
+        + normalize(turn.getContent())
+        + "\n"
+        + normalize(turn.getEnvironment());
   }
 
   // ---- Static noise-checking (shared with JsonlLineParser) ----
@@ -153,8 +52,86 @@ final class TranscriptNoiseFilter {
     String et = t(payload, "type");
     if ("agent_reasoning".equals(et)) return true;
     return ("task_started".equals(et) || "token_count".equals(et))
-        && firstText(t(payload, "message"), t(payload, "last_agent_message"),
-            t(payload, "aggregated_output")).isBlank();
+        && !hasVisibleEventContent(payload);
+  }
+
+  private static boolean hasVisibleEventContent(JsonNode payload) {
+    return !firstText(
+        t(payload, "message"),
+        t(payload, "last_agent_message"),
+        t(payload, "aggregated_output"),
+        commandSummary(payload),
+        contentFrom(payload.get("content")),
+        contentFrom(payload.get("output"))).isBlank();
+  }
+
+  private static String commandSummary(JsonNode node) {
+    JsonNode action = obj(node, "action");
+    JsonNode command = firstNode(node.get("command"), action.get("command"));
+    String renderedCommand = commandArray(command);
+    String output = firstText(t(node, "aggregated_output"), t(node, "stdout"), t(node, "stderr"));
+    if (!renderedCommand.isBlank() && !output.isBlank()) {
+      return "Command: " + renderedCommand + "\n\n" + output;
+    }
+    if (!renderedCommand.isBlank()) return "Command: " + renderedCommand;
+    return output;
+  }
+
+  private static String commandArray(JsonNode node) {
+    if (node == null || node.isMissingNode() || node.isNull()) return "";
+    if (node.isTextual()) return node.asText();
+    if (!node.isArray()) return "";
+    List<String> parts = new ArrayList<>();
+    for (JsonNode part : node) {
+      if (part.isTextual() || part.isNumber() || part.isBoolean()) parts.add(part.asText());
+    }
+    return String.join(" ", parts);
+  }
+
+  private static String contentFrom(JsonNode node) {
+    if (node == null || node.isMissingNode() || node.isNull()) return "";
+    if (node.isTextual()) return node.asText();
+    if (node.isArray()) {
+      List<String> blocks = new ArrayList<>();
+      for (JsonNode child : node) {
+        String block = contentBlock(child);
+        if (!block.isBlank()) blocks.add(block);
+      }
+      return String.join("\n\n", blocks);
+    }
+    if (node.isObject()) return contentBlock(node);
+    return "";
+  }
+
+  private static String contentBlock(JsonNode node) {
+    if (node == null || node.isMissingNode() || node.isNull()) return "";
+    if (node.isTextual()) return node.asText();
+    if (!node.isObject()) return "";
+    String type = t(node, "type");
+    return switch (type) {
+      case "text", "input_text", "output_text" -> firstText(t(node, "text"), t(node, "content"));
+      case "thinking" -> labeledBlock("Thinking", firstText(t(node, "thinking"), t(node, "text")));
+      case "tool_use" -> labeledBlock("Tool use: " + firstText(t(node, "name"), "tool"),
+          prettyJson(node.get("input")));
+      case "tool_result" -> labeledBlock("Tool result",
+          firstText(contentFrom(node.get("content")), prettyJson(node)));
+      case "function_call", "custom_tool_call", "local_shell_call", "web_search_call",
+          "tool_search_call" -> toolCallSummary(node);
+      case "function_call_output", "custom_tool_call_output", "tool_search_output" ->
+          firstText(contentFrom(node.get("output")), t(node, "output"), t(node, "content"),
+              contentFrom(node.get("content_items")), prettyJson(node.get("output")));
+      default -> firstText(t(node, "text"), t(node, "content"), t(node, "input"),
+          t(node, "output"), contentFrom(node.get("message")),
+          !type.isBlank() ? "[" + type + "]" : "");
+    };
+  }
+
+  private static String toolCallSummary(JsonNode node) {
+    if ("local_shell_call".equals(t(node, "type"))) return commandSummary(node);
+    String name = firstText(t(node, "name"), t(node, "type"), "tool");
+    String details = firstText(t(node, "arguments"), t(node, "input"),
+        prettyJson(node.get("action")), prettyJson(node.get("arguments")));
+    return labeledBlock("Tool call: " + name, details);
   }
 
   private static boolean isLowValueItem(JsonNode item) {
@@ -168,70 +145,23 @@ final class TranscriptNoiseFilter {
 
   private static boolean isEmptyReasoning(JsonNode item) {
     return "reasoning".equals(t(item, "type"))
-        && firstText(t(item, "summary"), t(item, "content")).isBlank();
+        && firstText(contentFrom(item.get("content")), reasoningSummary(item)).isBlank();
+  }
+
+  private static String reasoningSummary(JsonNode node) {
+    return firstText(contentFrom(node.get("summary")), contentFrom(node.get("content")));
   }
 
   private static boolean isInjectedContextItem(JsonNode item) {
     if (!"message".equals(t(item, "type")) || !"user".equals(t(item, "role"))) return false;
-    JsonNode content = item.get("content");
-    String body = "";
-    if (content != null && content.isArray()) {
-      for (JsonNode block : content) {
-        if ("input_text".equals(t(block, "type"))) {
-          body = t(block, "text");
-          break;
-        }
-      }
-    }
+    String body = contentFrom(item.get("content"));
     return isInjectedContext(body.trim().toLowerCase(java.util.Locale.ROOT));
-  }
-
-  private static boolean isNoiseLine(JsonNode root) {
-    String type = t(root, "type");
-    if ("file-history-snapshot".equals(type) || "progress".equals(type)) return true;
-    if ("system".equals(type) && "turn_duration".equals(t(root, "subtype"))) return true;
-    return contentArrayToolOnly(obj(root, "message").get("content"));
-  }
-
-  private static boolean contentArrayToolOnly(JsonNode content) {
-    if (content == null || !content.isArray() || content.isEmpty()) return false;
-    boolean sawTool = false;
-    for (JsonNode block : content) {
-      String bt = t(block, "type").toLowerCase(java.util.Locale.ROOT);
-      if ("tool_use".equals(bt) || "tool_result".equals(bt)) { sawTool = true; continue; }
-      if (!bt.isBlank() && !"thinking".equals(bt)) return false;
-    }
-    return sawTool;
   }
 
   private static boolean isInjectedContext(String n) {
     return n.startsWith("# agents.md instructions for ")
         || (n.contains("<instructions>") && n.contains("</instructions>")
             && n.contains("<environment_context>"));
-  }
-
-  private static boolean isToolType(String v) {
-    return v.contains("tool") || v.contains("function") || v.contains("shell")
-        || v.contains("exec") || v.contains("patch") || v.contains("command")
-        || v.contains("web_search") || v.contains("image_generation");
-  }
-
-  private static ChatRole roleFromString(String v) {
-    String n = v.toLowerCase(java.util.Locale.ROOT);
-    if (n.contains("user")) return ChatRole.USER;
-    if (n.contains("assistant") || n.contains("agent")) return ChatRole.ASSISTANT;
-    if (n.contains("developer") || n.contains("system")
-        || n.contains("meta") || n.contains("summary")) return ChatRole.SYSTEM;
-    if (isToolType(n)) return ChatRole.TOOL;
-    return ChatRole.UNKNOWN;
-  }
-
-  private static ChatRole roleForEvent(String eventType) {
-    String n = eventType.toLowerCase(java.util.Locale.ROOT);
-    if (n.contains("user_message")) return ChatRole.USER;
-    if (n.contains("agent_message") || n.contains("assistant")) return ChatRole.ASSISTANT;
-    if (isToolType(n)) return ChatRole.TOOL;
-    return ChatRole.SYSTEM;
   }
 
   // ---- Static JSON helpers ----
@@ -258,9 +188,31 @@ final class TranscriptNoiseFilter {
     return MAPPER.missingNode();
   }
 
+  private static JsonNode firstNode(JsonNode... nodes) {
+    for (JsonNode n : nodes) {
+      if (n != null && !n.isMissingNode() && !n.isNull()) return n;
+    }
+    return MAPPER.missingNode();
+  }
+
+  private static String prettyJson(JsonNode node) {
+    if (node == null || node.isMissingNode() || node.isNull()) return "";
+    if (node.isTextual() || node.isNumber() || node.isBoolean()) return node.asText();
+    try {
+      return PRETTY_JSON_WRITER.writeValueAsString(node);
+    } catch (Exception e) {
+      return node.toString();
+    }
+  }
+
   private static String firstText(String... values) {
     for (String v : values) { if (v != null && !v.isBlank()) return v; }
     return "";
+  }
+
+  private static String labeledBlock(String label, String content) {
+    if (content == null || content.isBlank()) return "[" + label + "]";
+    return "[" + label + "]\n" + content;
   }
 
   private static String normalize(String value) {
