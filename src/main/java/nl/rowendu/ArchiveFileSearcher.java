@@ -4,9 +4,15 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileAttribute;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Enumeration;
@@ -16,17 +22,26 @@ import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-final class ArchiveFileSearcher {
+final class ArchiveFileSearcher implements Searcher {
   private static final System.Logger LOGGER = System.getLogger(ArchiveFileSearcher.class.getName());
   private static final Set<String> SUPPORTED_EXTENSIONS =
       new HashSet<>(Arrays.asList(".zip", ".jar", ".ear", ".sar"));
+  private static final String ARCHIVE_ENTRY_SEPARATOR = "/";
   private static final String SKIP_DIRECTORY = "META-INF";
+  static final String TEMP_DIR_PROPERTY = "archivesearcher.tempDir";
 
-  boolean isArchiveSupported(String fileName) {
+  @Override
+  public SearcherMode getMode() {
+    return SearcherMode.ARCHIVE_FILENAME;
+  }
+
+  @Override
+  public boolean isArchiveSupported(String fileName) {
     return SUPPORTED_EXTENSIONS.stream().anyMatch(ext -> fileName.toLowerCase().endsWith(ext));
   }
 
-  List<SearchResult> search(Path archivePath, String searchText, CancellationToken token)
+  @Override
+  public List<SearchResult> search(Path archivePath, String searchText, CancellationToken token)
       throws IOException {
     if (!isArchiveSupported(archivePath.toString())) {
       throw new IOException("Unsupported archive type.");
@@ -37,26 +52,23 @@ final class ArchiveFileSearcher {
 
     String searchFileLower = searchText.toLowerCase();
     List<SearchResult> results = new ArrayList<>();
-    searchInArchive(archivePath.toFile(), archivePath, searchFileLower, "", token, results);
-    return results;
+    Path tempDir = createPrivateTempDirectory();
+    try {
+      searchInArchive(archivePath.toFile(), archivePath, searchFileLower, "", tempDir, token, results);
+      return results;
+    } finally {
+      deleteTempTree(tempDir);
+    }
   }
 
-  private void searchInArchive(
-      File archiveFile,
-      Path originalArchivePath,
-      String searchFileLower,
-      String parentPath,
-      CancellationToken token,
-      List<SearchResult> results)
+  private void searchInArchive(File archiveFile, Path originalArchivePath, String searchFileLower,
+      String parentPath, Path tempDir, CancellationToken token, List<SearchResult> results)
       throws IOException {
-    LOGGER.log(
-        System.Logger.Level.INFO,
-        "Checking archive: {0}",
+    LOGGER.log(System.Logger.Level.INFO, "Checking archive: {0}",
         parentPath.isEmpty() ? archiveFile.getName() : parentPath);
 
     try (ZipFile zip = new ZipFile(archiveFile)) {
       Enumeration<? extends ZipEntry> entries = zip.entries();
-
       while (entries.hasMoreElements()) {
         if (token.isCancelled()) {
           LOGGER.log(System.Logger.Level.INFO, "Archive search cancelled.");
@@ -64,34 +76,29 @@ final class ArchiveFileSearcher {
         }
 
         ZipEntry entry = entries.nextElement();
-        String currentPath =
-            parentPath.isEmpty() ? entry.getName() : parentPath + "/" + entry.getName();
+        String currentPath = archiveEntryPath(parentPath, entry.getName());
 
-        if (entry.isDirectory()) {
+        boolean directory = entry.isDirectory();
+        if (directory) {
           LOGGER.log(System.Logger.Level.DEBUG, () -> "Traversing folder: " + currentPath);
-          continue;
         }
 
-        String fileNameLower = new File(entry.getName()).getName().toLowerCase();
-        if (fileNameLower.contains(searchFileLower)) {
-          results.add(
-              new SearchResult(
-                  SearchMode.ARCHIVE_FILENAME,
-                  originalArchivePath,
-                  currentPath,
-                  0,
-                  currentPath,
-                  ""));
-        }
-
-        if (isArchiveSupported(entry.getName())) {
-          if (entry.getName().startsWith(SKIP_DIRECTORY + "/")) {
-            LOGGER.log(
-                System.Logger.Level.DEBUG, () -> "Skipping META-INF archive: " + currentPath);
-            continue;
+        if (!directory) {
+          String fileNameLower = new File(entry.getName()).getName().toLowerCase();
+          if (fileNameLower.contains(searchFileLower)) {
+            results.add(new SearchResult(getMode(), originalArchivePath, currentPath,
+                0, currentPath, ""));
           }
-          processNestedArchive(
-              zip, entry, originalArchivePath, searchFileLower, currentPath, token, results);
+
+          if (isArchiveSupported(entry.getName())) {
+            if (isInSkippedDirectory(entry.getName())) {
+              LOGGER.log(System.Logger.Level.DEBUG,
+                  () -> "Skipping META-INF archive: " + currentPath);
+            } else {
+              processNestedArchive(zip, entry, originalArchivePath, searchFileLower, tempDir,
+                  currentPath, token, results);
+            }
+          }
         }
       }
     } catch (IOException e) {
@@ -101,29 +108,33 @@ final class ArchiveFileSearcher {
     }
   }
 
-  private void processNestedArchive(
-      ZipFile zip,
-      ZipEntry entry,
-      Path originalArchivePath,
-      String searchFileLower,
-      String currentPath,
-      CancellationToken token,
+  private String archiveEntryPath(String parentPath, String entryName) {
+    return parentPath.isEmpty() ? entryName : parentPath + ARCHIVE_ENTRY_SEPARATOR + entryName;
+  }
+
+  private boolean isInSkippedDirectory(String entryName) {
+    return entryName.startsWith(SKIP_DIRECTORY + ARCHIVE_ENTRY_SEPARATOR);
+  }
+
+  private void processNestedArchive(ZipFile zip, ZipEntry entry, Path originalArchivePath,
+      String searchFileLower, Path tempDir, String currentPath, CancellationToken token,
       List<SearchResult> results) {
     try {
-      Path tempFile = extractToTempFile(zip, entry);
+      Path tempFile = extractToTempFile(zip, entry, tempDir);
       try {
-        searchInArchive(
-            tempFile.toFile(), originalArchivePath, searchFileLower, currentPath, token, results);
+        searchInArchive(tempFile.toFile(), originalArchivePath, searchFileLower,
+            currentPath, tempDir, token, results);
       } finally {
         deleteTempFile(tempFile);
       }
     } catch (Exception e) {
-      LOGGER.log(System.Logger.Level.ERROR, "Failed to process nested archive: " + currentPath, e);
+      LOGGER.log(System.Logger.Level.ERROR,
+          "Failed to process nested archive: " + currentPath, e);
     }
   }
 
-  private Path extractToTempFile(ZipFile zip, ZipEntry entry) throws IOException {
-    Path tempFile = Files.createTempFile("nested", ".tmp");
+  private Path extractToTempFile(ZipFile zip, ZipEntry entry, Path tempDir) throws IOException {
+    Path tempFile = Files.createTempFile(tempDir, "nested", ".tmp");
     try (InputStream in = zip.getInputStream(entry);
         OutputStream out = Files.newOutputStream(tempFile)) {
       byte[] buffer = new byte[8192];
@@ -139,11 +150,53 @@ final class ArchiveFileSearcher {
     try {
       Files.delete(tempFile);
     } catch (NoSuchFileException ignored) {
-      // Already removed.
     } catch (IOException e) {
-      LOGGER.log(
-          System.Logger.Level.WARNING,
+      LOGGER.log(System.Logger.Level.WARNING,
           "Failed to delete temporary file " + tempFile + ": " + e.getMessage());
+    }
+  }
+
+  private Path createPrivateTempDirectory() throws IOException {
+    Path baseDir = tempBaseDirectory();
+    try {
+      FileAttribute<Set<PosixFilePermission>> permissions =
+          PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------"));
+      Files.createDirectories(baseDir, permissions);
+      Files.setPosixFilePermissions(baseDir, PosixFilePermissions.fromString("rwx------"));
+      return Files.createTempDirectory(baseDir, "archive-searcher-", permissions);
+    } catch (UnsupportedOperationException e) {
+      Files.createDirectories(baseDir);
+      return Files.createTempDirectory(baseDir, "archive-searcher-");
+    }
+  }
+
+  private Path tempBaseDirectory() {
+    String configured = System.getProperty(TEMP_DIR_PROPERTY);
+    if (configured != null && !configured.isBlank()) {
+      return Path.of(configured);
+    }
+    return Path.of(System.getProperty("user.home"), ".archivesearcher", "tmp");
+  }
+
+  private void deleteTempTree(Path tempDir) {
+    try {
+      Files.walkFileTree(tempDir, new SimpleFileVisitor<>() {
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+          Files.delete(file);
+          return FileVisitResult.CONTINUE;
+        }
+
+        @Override
+        public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+          if (exc != null) throw exc;
+          Files.delete(dir);
+          return FileVisitResult.CONTINUE;
+        }
+      });
+    } catch (IOException e) {
+      LOGGER.log(System.Logger.Level.WARNING,
+          "Failed to delete temporary directory " + tempDir + ": " + e.getMessage());
     }
   }
 }

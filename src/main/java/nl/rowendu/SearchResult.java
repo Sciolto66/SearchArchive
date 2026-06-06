@@ -7,7 +7,7 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 
 final class SearchResult {
-  private final SearchMode mode;
+  private final SearcherMode mode;
   private final Path filePath;
   private final String location;
   private final String title;
@@ -16,36 +16,19 @@ final class SearchResult {
   private final String displayText;
   private final String rawContent;
 
-  SearchResult(
-      SearchMode mode,
-      Path filePath,
-      String location,
-      int lineNumber,
-      String displayText,
-      String rawContent) {
+  SearchResult(SearcherMode mode, Path filePath, String location,
+      int lineNumber, String displayText, String rawContent) {
     this(mode, filePath, location, mode.toString(), lineNumber, displayText, rawContent);
   }
 
-  SearchResult(
-      SearchMode mode,
-      Path filePath,
-      String location,
-      String title,
-      int lineNumber,
-      String displayText,
-      String rawContent) {
+  SearchResult(SearcherMode mode, Path filePath, String location, String title,
+      int lineNumber, String displayText, String rawContent) {
     this(mode, filePath, location, title, lineNumber, Set.of(lineNumber), displayText, rawContent);
   }
 
-  private SearchResult(
-      SearchMode mode,
-      Path filePath,
-      String location,
-      String title,
-      int lineNumber,
-      Set<Integer> sourceLineNumbers,
-      String displayText,
-      String rawContent) {
+  private SearchResult(SearcherMode mode, Path filePath, String location, String title,
+      int lineNumber, Set<Integer> sourceLineNumbers,
+      String displayText, String rawContent) {
     this.mode = mode;
     this.filePath = filePath;
     this.location = location;
@@ -57,13 +40,12 @@ final class SearchResult {
   }
 
   SearchResult withAdditionalSourceLine(int sourceLineNumber) {
-    TreeSet<Integer> mergedLineNumbers = new TreeSet<>(sourceLineNumbers);
-    mergedLineNumbers.add(sourceLineNumber);
-    return new SearchResult(
-        mode, filePath, location, title, lineNumber, mergedLineNumbers, displayText, rawContent);
+    TreeSet<Integer> merged = new TreeSet<>(sourceLineNumbers);
+    merged.add(sourceLineNumber);
+    return new SearchResult(mode, filePath, location, title, lineNumber, merged, displayText, rawContent);
   }
 
-  SearchMode getMode() {
+  SearcherMode getMode() {
     return mode;
   }
 
@@ -112,25 +94,12 @@ final class SearchResult {
   @Override
   public String toString() {
     return "SearchResult{"
-        + "mode="
-        + mode
-        + ", filePath="
-        + filePath
-        + ", location='"
-        + location
-        + '\''
-        + ", title='"
-        + title
-        + '\''
-        + ", lineNumber="
-        + lineNumber
-        + ", sourceLineNumbers="
-        + sourceLineNumbers
-        + ", displayText='"
-        + displayText
-        + '\''
-        + ", rawContentLength="
-        + rawContent.length()
-        + '}';
+        + "mode=" + mode + ", filePath=" + filePath
+        + ", location='" + location + '\''
+        + ", title='" + title + '\''
+        + ", lineNumber=" + lineNumber
+        + ", sourceLineNumbers=" + sourceLineNumbers
+        + ", displayText='" + displayText + '\''
+        + ", rawContentLength=" + rawContent.length() + '}';
   }
 }
