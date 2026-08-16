@@ -45,7 +45,7 @@ class ArchiveFileSearcherTest {
     List<SearchResult> results = searcher.search(archive, "CONFIG", () -> false);
 
     assertEquals(1, results.size());
-    assertEquals("settings/config.properties", results.get(0).getLocation());
+    assertEquals("archive.zip!settings/config.properties", results.get(0).getLocation());
     assertTempBaseIsEmpty();
   }
 
@@ -59,7 +59,7 @@ class ArchiveFileSearcherTest {
     List<SearchResult> results = searcher.search(archive, "target", () -> false);
 
     assertEquals(1, results.size());
-    assertEquals("lib/nested.jar/inside/target.txt", results.get(0).getLocation());
+    assertEquals("archive.zip!lib/nested.jar!inside/target.txt", results.get(0).getLocation());
     assertTempBaseIsEmpty();
   }
 
