@@ -26,6 +26,7 @@ final class ArchiveFileSearcher implements Searcher {
   private static final System.Logger LOGGER = System.getLogger(ArchiveFileSearcher.class.getName());
   private static final Set<String> SUPPORTED_EXTENSIONS =
       new HashSet<>(Arrays.asList(".zip", ".jar", ".ear", ".sar"));
+  private static final String ARCHIVE_BANG = "!";
   private static final String ARCHIVE_ENTRY_SEPARATOR = "/";
   private static final String SKIP_DIRECTORY = "META-INF";
   static final String TEMP_DIR_PROPERTY = "archivesearcher.tempDir";
@@ -54,7 +55,11 @@ final class ArchiveFileSearcher implements Searcher {
     List<SearchResult> results = new ArrayList<>();
     Path tempDir = createPrivateTempDirectory();
     try {
-      searchInArchive(archivePath.toFile(), archivePath, searchFileLower, "", tempDir, token, results);
+      String rootPath = archivePath.getFileName() == null
+          ? archivePath.toString()
+          : archivePath.getFileName().toString();
+      searchInArchive(archivePath.toFile(), archivePath, searchFileLower, rootPath, tempDir, token,
+          results);
       return results;
     } finally {
       deleteTempTree(tempDir);
@@ -109,7 +114,10 @@ final class ArchiveFileSearcher implements Searcher {
   }
 
   private String archiveEntryPath(String parentPath, String entryName) {
-    return parentPath.isEmpty() ? entryName : parentPath + ARCHIVE_ENTRY_SEPARATOR + entryName;
+    if (parentPath.isEmpty()) {
+      return entryName;
+    }
+    return parentPath + ARCHIVE_BANG + entryName;
   }
 
   private boolean isInSkippedDirectory(String entryName) {
@@ -120,8 +128,16 @@ final class ArchiveFileSearcher implements Searcher {
       String searchFileLower, Path tempDir, String currentPath, CancellationToken token,
       List<SearchResult> results) {
     try {
-      Path tempFile = extractToTempFile(zip, entry, tempDir);
+      if (token.isCancelled()) {
+        LOGGER.log(System.Logger.Level.DEBUG, "Cancelled before processing nested archive: " + currentPath);
+        return;
+      }
+      Path tempFile = extractToTempFile(zip, entry, tempDir, token);
       try {
+        if (token.isCancelled()) {
+          LOGGER.log(System.Logger.Level.DEBUG, "Cancelled before searching nested archive: " + currentPath);
+          return;
+        }
         searchInArchive(tempFile.toFile(), originalArchivePath, searchFileLower,
             currentPath, tempDir, token, results);
       } finally {
@@ -133,13 +149,18 @@ final class ArchiveFileSearcher implements Searcher {
     }
   }
 
-  private Path extractToTempFile(ZipFile zip, ZipEntry entry, Path tempDir) throws IOException {
+  private Path extractToTempFile(ZipFile zip, ZipEntry entry, Path tempDir,
+      CancellationToken token) throws IOException {
     Path tempFile = Files.createTempFile(tempDir, "nested", ".tmp");
     try (InputStream in = zip.getInputStream(entry);
         OutputStream out = Files.newOutputStream(tempFile)) {
       byte[] buffer = new byte[8192];
       int bytesRead;
       while ((bytesRead = in.read(buffer)) != -1) {
+        if (token.isCancelled()) {
+          LOGGER.log(System.Logger.Level.DEBUG, "Cancelled while extracting entry: " + entry.getName());
+          return tempFile;
+        }
         out.write(buffer, 0, bytesRead);
       }
     }
